@@ -61,3 +61,70 @@ History tables (SHIPMENT_EVENTS, VEHICLE_TELEMETRY) and static reference tables 
 ## Scenario IDs
 
 Scenario IDs from `scenario_ground_truth` may appear in validation/reference queries but must NEVER be hardcoded into Silver transformation logic.
+
+## Data Modeling and Validation Rules
+
+- Before creating or modifying any fact table, bridge, analytical mart, or other grain-sensitive object, explicitly state the intended target grain and the business key(s) that enforce that grain.
+
+- When joining multiple fact-like or many-side datasets, aggregate each source to the intended target grain before joining. Do not join detailed fact tables directly if doing so can create row multiplication or fan-out.
+
+- Never hardcode synthetic scenario IDs, scenario names, expected target entities, or expected outcomes into transformation logic. Scenario-specific IDs and expected results may only be used in validation/reference queries to confirm that the generated scenarios remain detectable after transformation.
+
+## Change Management (schemachange)
+
+All persistent Snowflake schema changes are managed through version-controlled migration files under `migrations/` using [schemachange](https://github.com/Snowflake-Labs/schemachange). See `docs/change-management.md` for full details.
+
+### Persistent DDL rule
+
+Do not directly make persistent Snowflake schema changes first. For any new or modified persistent object:
+
+1. Inspect the current state
+2. Define the intended change
+3. Create a new migration file under `migrations/`
+4. Show the migration diff
+5. Validate the migration logic
+6. Execute through schemachange
+7. Run the relevant validation SQL
+8. Report the result
+
+### Versioned migrations
+
+Use versioned migrations for one-time structural changes:
+
+```text
+V<major>.<minor>.<patch>__<description>.sql
+```
+
+Examples:
+- `V1.1.0__add_supplier_risk_columns.sql`
+- `V1.2.0__create_inventory_risk_view.sql`
+- `V2.0.0__create_gold_schema.sql`
+
+Never edit an already-applied versioned migration. Create a new migration instead.
+
+### Repeatable migrations
+
+Use `R__<description>.sql` only for objects that are intentionally reapplied when their definition changes:
+
+- Views (`CREATE OR REPLACE VIEW`)
+- Functions (`CREATE OR REPLACE FUNCTION`)
+- Stored procedures (`CREATE OR REPLACE PROCEDURE`)
+
+Do not use repeatable migrations for table structure changes.
+
+### Always migrations
+
+Do not use `A__` scripts unless there is a specific justified need.
+
+### Version ranges
+
+| Range | Purpose |
+|---|---|
+| V1.0.0 | Silver baseline (no-op, auto-recorded by schemachange) |
+| V1.1.0+ | Silver-layer additions/modifications |
+| V2.0.0+ | Gold-layer creation and changes |
+| V3.0.0+ | Reserved for future layers or major refactors |
+
+### Change history
+
+Migration tracking is stored in `SUPPLY_CHAIN_DW.SCHEMACHANGE.CHANGE_HISTORY`. Configuration lives in `schemachange-config.yml` (config version 2).
