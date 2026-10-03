@@ -1,33 +1,16 @@
 config-version: 2
 
-# -- Root folder containing versioned (V*), repeatable (R__*) migrations ------
-root-folder: './migrations'
+schemachange:
+  root-folder: "./migrations"
 
-# -- Snowflake connection -----------------------------------------------------
-# schemachange uses a named Snowflake connection or environment variables.
-# Do NOT hardcode credentials here.
-#
-# Recommended — Named connection:
-#   Set the environment variable before running schemachange:
-#     export SCHEMACHANGE_CONNECTION_NAME=<your_connection_name>
-#
-# Legacy / fallback — Individual environment variables:
-#   SNOWFLAKE_ACCOUNT, SNOWFLAKE_USER, SNOWFLAKE_PASSWORD / SNOWFLAKE_PRIVATE_KEY_PATH
-#   SNOWFLAKE_ROLE, SNOWFLAKE_WAREHOUSE, SNOWFLAKE_DATABASE
-#   Or: SNOWFLAKE_DEFAULT_CONNECTION_NAME=<connection_name>
-#
-# The connection must have permissions to:
-#   - USE DATABASE SUPPLY_CHAIN_DW
-#   - CREATE SCHEMA in SUPPLY_CHAIN_DW (for first run)
-#   - CREATE TABLE in SUPPLY_CHAIN_DW.SCHEMACHANGE
-#   - Execute DDL in target schemas (SILVER, GOLD, etc.)
+  connection-name: "CONN"
+  connections-file-path: "C:/Users/heman/.snowflake/connections.toml"
 
-# -- Change history tracking ---------------------------------------------------
-snowflake-database: 'SUPPLY_CHAIN_DW'
-snowflake-schema: 'SCHEMACHANGE'
-change-history-table: 'CHANGE_HISTORY'
-create-change-history-table: true
+  change-history-table: "SUPPLY_CHAIN_DW.SCHEMACHANGE.CHANGE_HISTORY"
+  create-change-history-table: true
 
-# -- Execution settings --------------------------------------------------------
-autocommit: true
-verbose: false
+  autocommit: true
+
+snowflake:
+  database: "SUPPLY_CHAIN_DW"
+  schema: "SCHEMACHANGE"
