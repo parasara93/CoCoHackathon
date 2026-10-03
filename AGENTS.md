@@ -128,3 +128,24 @@ Do not use `A__` scripts unless there is a specific justified need.
 ### Change history
 
 Migration tracking is stored in `SUPPLY_CHAIN_DW.SCHEMACHANGE.CHANGE_HISTORY`. Configuration lives in `schemachange-config.yml` (config version 2).
+
+### Schema change governance
+
+The authoritative change-management state is the combination of migration files in Git **plus** `SUPPLY_CHAIN_DW.SCHEMACHANGE.CHANGE_HISTORY`. Both must agree.
+
+1. **All persistent Snowflake object changes must be executed through schemachange.** Do not bypass schemachange by executing migration SQL directly through ad-hoc SQL tools, `snowflake_sql_execute`, or any other mechanism — even if it is more convenient.
+
+2. **Do not manually write to `CHANGE_HISTORY`.** Never insert, update, delete, or otherwise edit rows in `SUPPLY_CHAIN_DW.SCHEMACHANGE.CHANGE_HISTORY`. Only schemachange itself may write to this table.
+
+3. **If schemachange is unavailable in the current execution environment:**
+   - Create the migration file under `migrations/`.
+   - Create or update the relevant validation SQL under `validations/`.
+   - **Do not execute the migration directly.**
+   - Stop and report: `"Migration prepared; execution pending through schemachange."`
+   - The user or CI/CD pipeline executes externally through a working schemachange environment.
+
+4. **Before deployment**, run `schemachange deploy --dry-run` and inspect pending migrations. Do not proceed blindly if the change history and Git are out of sync (e.g., unexpected older versions pending, checksum drift).
+
+5. **After deployment**, run the relevant validation suite (`validations/silver/` or `validations/gold/`) and report PASS/FAIL results.
+
+6. **Already-applied versioned migration files are immutable.** Never edit an applied migration; create the next versioned migration instead.
