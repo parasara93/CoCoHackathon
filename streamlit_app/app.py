@@ -1,298 +1,441 @@
-"""
-Resilient Supply Chain Control Tower — Expert Chat Interface
-"""
+from __future__ import annotations
+
+import inspect
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
 import streamlit as st
-import pandas as pd
-import altair as alt
-from agent_client import call_agent, run_sql, get_snowflake_connection
-from chart_queries import CHART_QUERIES, detect_chart_intent
+
+import agent_client
+import chart_queries
+
+try:
+    from risk_cases import render_risk_cases
+except Exception:
+    render_risk_cases = None
+
 
 st.set_page_config(
-    page_title="Supply Chain Control Tower",
+    page_title="Resilient Supply Chain Control Tower",
     page_icon="SC",
     layout="wide",
 )
 
-EXPERTS = [
-    "Overall Resilience Expert",
-    "Procurement Expert",
-    "Logistics Expert",
-    "Inventory & Plant Expert",
-    "Customer Impact Expert",
-]
+APP_TITLE = "Resilient Supply Chain Control Tower"
+APP_SUBTITLE = (
+    "Conversational risk intelligence across suppliers, inventory, fulfillment, "
+    "logistics, and customer impact."
+)
 
-SPECIALISTS = [
-    "Procurement Expert",
-    "Logistics Expert",
-    "Inventory & Plant Expert",
-    "Customer Impact Expert",
-]
-
-EXPERT_SUBTITLES = {
-    "Overall Resilience Expert": "Cross-domain synthesis",
-    "Procurement Expert": "Supplier risk & landed cost",
-    "Logistics Expert": "Routes, carriers & delays",
-    "Inventory & Plant Expert": "Inventory pressure & fulfillment",
-    "Customer Impact Expert": "Customer exposure & service impact",
+EXPERTS: Dict[str, Dict[str, Any]] = {
+    "Procurement Expert": {
+        "agent": "SUPPLY_CHAIN_DW.GOLD.SUPPLIER_RISK_AGENT",
+        "description": "Supplier performance, deterioration, sourcing risk, and downstream exposure.",
+        "capability_hint": "Ask about supplier risk scores, lead-time deterioration, quality, fill rate, and exposed demand.",
+        "suggestions": [
+            "Which suppliers are at risk and why?",
+            "Which supplier has the highest risk score?",
+            "Which suppliers have the worst on-time delivery decline?",
+            "How much outstanding order value is exposed to deteriorating suppliers?",
+            "Generate a chart ranking suppliers by risk score.",
+        ],
+    },
+    "Inventory & Plant Expert": {
+        "agent": "SUPPLY_CHAIN_DW.GOLD.INVENTORY_RISK_AGENT",
+        "description": "Plant inventory shortages, safety-stock breaches, reorder pressure, and fulfillment risk.",
+        "capability_hint": "Ask about out-of-stock positions, low inventory, critical parts, plant exposure, and reorder risk.",
+        "suggestions": [
+            "Which parts are below safety stock and at which plants?",
+            "Which plant has the most out-of-stock positions?",
+            "Show the highest-risk inventory positions.",
+            "What outstanding demand is exposed to low inventory?",
+            "Generate a chart of below-safety-stock positions by plant.",
+        ],
+    },
+    "Plant Fulfillment Expert": {
+        "agent": "SUPPLY_CHAIN_DW.GOLD.PLANT_FULFILLMENT_AGENT",
+        "description": "Order backlog, fulfillment performance, late orders, and plant-level outstanding demand.",
+        "capability_hint": "Ask about backlog, late orders, fulfillment percentage, outstanding quantity, and plant bottlenecks.",
+        "suggestions": [
+            "Which plant has the highest order backlog?",
+            "Which orders are currently late with the highest outstanding value?",
+            "What is the average fulfillment rate by plant?",
+            "Show unfulfilled orders at the highest-risk plant.",
+            "Generate a chart of backlog by plant.",
+        ],
+    },
+    "Logistics Expert": {
+        "agent": "SUPPLY_CHAIN_DW.GOLD.LOGISTICS_RISK_AGENT",
+        "description": "Shipment delays, route disruptions, carrier performance, transit variance, and shipping cost.",
+        "capability_hint": "Ask about disrupted routes, delayed shipments, carrier performance, route deviations, and shipping cost.",
+        "suggestions": [
+            "Which routes have the highest delivery delays?",
+            "Which carriers have the worst on-time performance?",
+            "Show the most disrupted shipments.",
+            "What is the total cost of delayed shipments?",
+            "Generate a chart of delivery delay by route.",
+        ],
+    },
+    "Customer Impact Expert": {
+        "agent": "SUPPLY_CHAIN_DW.GOLD.CUSTOMER_IMPACT_AGENT",
+        "description": "Customer disruption impact, late orders, overdue value, fulfillment, and segment exposure.",
+        "capability_hint": "Ask which customers are most impacted and how much value is overdue or outstanding.",
+        "suggestions": [
+            "Which customers are most impacted by supply chain disruptions?",
+            "What is the total overdue outstanding value across impacted customers?",
+            "Which customer segment has the worst fulfillment rate?",
+            "Show customers with the highest outstanding value.",
+            "Generate a chart ranking impacted customers by outstanding value.",
+        ],
+    },
+    "Overall Resilience Expert": {
+        "agent": "SUPPLY_CHAIN_DW.GOLD.RESILIENCE_ORCHESTRATOR",
+        "description": "Cross-domain resilience analysis and governed operational actions.",
+        "capability_hint": (
+            "Can analyze cross-domain risks, create governed Snowflake risk cases, "
+            "and raise GitHub issues for operational tracking when you explicitly ask."
+        ),
+        "suggestions": [
+            "Give me a resilience dashboard summary of the highest-priority risks.",
+            "Trace the major risks across supplier, inventory, fulfillment, logistics, and customer impact.",
+            "Create a risk case for the highest-priority issue after validating the evidence.",
+            "Create a risk case and raise a GitHub issue for the highest-priority disruption.",
+            "What are the top three risks that need operational attention right now?",
+        ],
+    },
 }
 
-SUGGESTED_QUESTIONS = {
-    "Procurement Expert": [
-        "Which suppliers are showing the strongest deterioration?",
-        "Which supplier has the highest downstream exposure?",
-        "Generate a chart ranking suppliers by risk score.",
-        "Generate a chart comparing supplier OTD and fill rate.",
-        "Which supplier-part combinations have the highest estimated landed cost?",
-    ],
-    "Logistics Expert": [
-        "Which routes are causing the largest delays?",
-        "Which carriers have the weakest on-time performance?",
-        "Generate a chart of delayed shipments by route.",
-        "Generate a chart comparing route delay and shipping cost.",
-        "Which routes show the most disruption events?",
-    ],
-    "Inventory & Plant Expert": [
-        "Which plants have the highest inventory pressure?",
-        "Which parts have the lowest days of demand coverage?",
-        "Generate a chart of below-safety-stock positions by plant.",
-        "Generate a chart of Days of Demand Coverage by plant.",
-        "Which plants combine inventory pressure and fulfillment backlog?",
-    ],
-    "Customer Impact Expert": [
-        "Which customers are most impacted?",
-        "Which customers have the highest outstanding value?",
-        "Generate a chart ranking customers by outstanding value.",
-        "Generate a chart comparing fulfillment percentage across customers.",
-        "Which customers have the most currently late orders?",
-    ],
-    "Overall Resilience Expert": [
-        "What are the biggest supply-chain risks right now?",
-        "Which area should we prioritize first?",
-        "Summarize supplier, inventory, logistics, and customer risk.",
-        "Generate a chart showing the top risks across domains.",
-        "What evidence supports the highest-priority issue?",
-    ],
-}
 
-
-def render_chart(chart_key: str, conn) -> alt.Chart | None:
-    spec = CHART_QUERIES.get(chart_key)
-    if not spec:
-        return None
-
-    rows = run_sql(spec["sql"], conn=conn)
-    if not rows:
-        return None
-
-    df = pd.DataFrame(rows)
-    ct = spec["chart_type"]
-    title = spec["title"]
-
-    if ct == "horizontal_bar":
-        chart = (
-            alt.Chart(df, title=title)
-            .mark_bar()
-            .encode(
-                x=alt.X(spec["x"], type="quantitative"),
-                y=alt.Y(spec["y"], type="nominal", sort="-x"),
-                color=alt.Color(spec.get("color", spec["y"]), type="nominal") if spec.get("color") else alt.value("#4C78A8"),
-                tooltip=list(df.columns),
-            )
-            .properties(height=max(len(df) * 22, 200))
-        )
-    elif ct == "bar":
-        chart = (
-            alt.Chart(df, title=title)
-            .mark_bar()
-            .encode(
-                x=alt.X(spec["x"], type="nominal", sort=None),
-                y=alt.Y(spec["y"], type="quantitative"),
-                color=alt.Color(spec.get("color", spec["x"]), type="nominal") if spec.get("color") else alt.value("#4C78A8"),
-                tooltip=list(df.columns),
-            )
-            .properties(height=350)
-        )
-    elif ct == "scatter":
-        enc = {
-            "x": alt.X(spec["x"], type="quantitative"),
-            "y": alt.Y(spec["y"], type="quantitative"),
-            "tooltip": list(df.columns),
-        }
-        if spec.get("color"):
-            enc["color"] = alt.Color(spec["color"], type="nominal")
-        chart = alt.Chart(df, title=title).mark_circle(size=80).encode(**enc).properties(height=400)
-    else:
-        chart = (
-            alt.Chart(df, title=title)
-            .mark_bar()
-            .encode(
-                x=alt.X(list(df.columns)[0], type="nominal"),
-                y=alt.Y(list(df.columns)[1], type="quantitative"),
-                tooltip=list(df.columns),
-            )
-            .properties(height=350)
-        )
-
-    return chart
-
-
-def init_session_state():
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "expert" not in st.session_state:
-        st.session_state.expert = EXPERTS[0]
-    if "conn" not in st.session_state:
-        st.session_state.conn = None
-    if "prefill" not in st.session_state:
-        st.session_state.prefill = ""
-
-
-def get_conn():
-    if st.session_state.conn is None:
-        st.session_state.conn = get_snowflake_connection()
-    return st.session_state.conn
-
-
-def process_question(question: str):
-    expert = st.session_state.expert
-    st.session_state.messages.append({"role": "user", "content": question})
-
-    chart_key = detect_chart_intent(question, expert)
-
-    with st.chat_message("assistant"):
-        if chart_key:
-            with st.spinner("Generating chart from governed data..."):
-                chart = render_chart(chart_key, get_conn())
-            title = CHART_QUERIES[chart_key]["title"]
-            st.markdown(f"**{title}**")
-            if chart:
-                st.altair_chart(chart, width="stretch")
-                msg_content = f"**{title}**\n\n*(Chart rendered from governed Gold data)*"
-            else:
-                st.warning("No data returned for this chart.")
-                msg_content = f"Requested chart: {title} -- no data."
-
-            with st.spinner("Getting expert analysis..."):
-                result = call_agent(expert, question, conn=get_conn())
-            if result["text"]:
-                st.markdown(result["text"])
-                msg_content += f"\n\n{result['text']}"
-            if result["tools_used"]:
-                st.caption(f"Tools: {', '.join(result['tools_used'])}")
-
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": msg_content,
-                "chart_key": chart_key,
-                "tools": result.get("tools_used", []),
-            })
-        else:
-            with st.spinner(f"Consulting {expert}..."):
-                result = call_agent(expert, question, conn=get_conn())
-            st.markdown(result["text"])
-            if result["tools_used"]:
-                st.caption(f"Tools: {', '.join(result['tools_used'])}")
-
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": result["text"],
-                "tools": result.get("tools_used", []),
-            })
-
-
-def main():
-    init_session_state()
-
-    st.markdown(
-        "<h2 style='margin-bottom:0'>Resilient Supply Chain Control Tower</h2>"
-        "<p style='color:gray;margin-top:0'>Expert Chat Interface</p>",
-        unsafe_allow_html=True,
+def _resolve_agent_callable() -> Callable[..., Any]:
+    """Support the existing agent_client without forcing one exact function name."""
+    for name in (
+        "call_agent",
+        "invoke_agent",
+        "ask_agent",
+        "run_agent",
+        "query_agent",
+        "send_message",
+    ):
+        fn = getattr(agent_client, name, None)
+        if callable(fn):
+            return fn
+    raise AttributeError(
+        "No supported agent invocation function was found in agent_client.py. "
+        "Expected one of: call_agent, invoke_agent, ask_agent, run_agent, query_agent, send_message."
     )
 
-    # --- Expert hierarchy nav ---
-    selected = st.session_state.expert
 
-    def _select(name):
-        if name != st.session_state.expert:
-            st.session_state.expert = name
-            st.session_state.messages = []
-            st.session_state.prefill = ""
+def _call_agent(agent_name: str, question: str) -> Any:
+    fn = _resolve_agent_callable()
+    sig = inspect.signature(fn)
+    names = list(sig.parameters.keys())
+
+    # Prefer keyword calls when the existing wrapper exposes descriptive parameter names.
+    kwargs: Dict[str, Any] = {}
+    for p in names:
+        lp = p.lower()
+        if lp in {"agent", "agent_name", "agent_fqn"}:
+            kwargs[p] = agent_name
+        elif lp in {"question", "prompt", "message", "user_message", "query"}:
+            kwargs[p] = question
+
+    if len(kwargs) >= 2:
+        return fn(**kwargs)
+
+    # Common positional pattern: (agent_name, question)
+    if len(names) >= 2:
+        return fn(agent_name, question)
+
+    # Some wrappers bind the agent internally and accept only a question.
+    if len(names) == 1:
+        return fn(question)
+
+    return fn()
+
+
+def _normalize_agent_response(result: Any) -> Tuple[str, List[str]]:
+    """Return display text and optional tool names from common wrapper response shapes."""
+    if result is None:
+        return "No response returned by the agent.", []
+
+    if isinstance(result, str):
+        return result, []
+
+    if isinstance(result, dict):
+        text = (
+            result.get("text")
+            or result.get("response")
+            or result.get("answer")
+            or result.get("message")
+            or result.get("content")
+        )
+        tools = result.get("tools") or result.get("tool_names") or []
+        if isinstance(tools, str):
+            tools = [tools]
+        if text is not None:
+            return str(text), list(tools)
+
+    # Last-resort readable representation.
+    return str(result), []
+
+
+def _find_chart_renderer() -> Optional[Callable[..., Any]]:
+    for name in (
+        "render_chart_for_question",
+        "render_chart",
+        "build_chart",
+        "get_chart",
+    ):
+        fn = getattr(chart_queries, name, None)
+        if callable(fn):
+            return fn
+    return None
+
+
+def _render_optional_chart(expert_name: str, question: str) -> None:
+    """
+    Preserve the existing chart module where possible.
+    If chart_queries.py does not expose a generic renderer, the normal chat still works.
+    """
+    renderer = _find_chart_renderer()
+    if renderer is None:
+        return
+
+    try:
+        sig = inspect.signature(renderer)
+        params = list(sig.parameters.keys())
+        kwargs: Dict[str, Any] = {}
+
+        for p in params:
+            lp = p.lower()
+            if lp in {"expert", "expert_name"}:
+                kwargs[p] = expert_name
+            elif lp in {"question", "prompt", "query"}:
+                kwargs[p] = question
+
+        if kwargs:
+            chart = renderer(**kwargs)
+        elif len(params) >= 2:
+            chart = renderer(expert_name, question)
+        elif len(params) == 1:
+            chart = renderer(question)
+        else:
+            chart = renderer()
+
+        if chart is None:
+            return
+
+        # Support either a renderer that draws itself or one that returns a chart.
+        if hasattr(chart, "to_dict") or chart.__class__.__module__.startswith("altair"):
+            st.altair_chart(chart, width="stretch")
+        elif hasattr(chart, "figure"):
+            st.pyplot(chart.figure)
+    except Exception:
+        # Charting is supplemental. Do not fail the core conversation.
+        return
+
+
+def _init_state() -> None:
+    defaults = {
+        "messages": [],
+        "conversation_started": False,
+        "selected_suggestion": None,
+        "active_expert": "Procurement Expert",
+        "show_risk_cases": False,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def _reset_conversation() -> None:
+    st.session_state.messages = []
+    st.session_state.conversation_started = False
+    st.session_state.selected_suggestion = None
+
+
+def _on_expert_change() -> None:
+    # New domain = new focused conversation.
+    _reset_conversation()
+
+
+def _render_header() -> None:
+    st.title(APP_TITLE)
+    st.caption(APP_SUBTITLE)
+
+
+def _render_expert_selector() -> str:
+    col1, col2 = st.columns([4, 1])
+
+    with col1:
+        expert = st.selectbox(
+            "Choose an expert",
+            list(EXPERTS.keys()),
+            key="active_expert",
+            on_change=_on_expert_change,
+        )
+
+    with col2:
+        st.write("")
+        st.write("")
+        if st.button("Start over", width="stretch"):
+            _reset_conversation()
             st.rerun()
 
-    # Orchestrator row
-    orch = "Overall Resilience Expert"
-    if selected == orch:
-        st.markdown(
-            "<p style='color:#e5e7eb; font-weight:600; font-size:1.05rem; margin:0; "
-            "border-bottom:2px solid #f87171; display:inline-block; padding-bottom:2px'>"
-            "Overall Resilience Expert</p>"
-            "<span style='color:#9ca3af; font-size:0.85rem; margin-left:10px'>Cross-domain synthesis</span>",
-            unsafe_allow_html=True,
+    cfg = EXPERTS[expert]
+    st.markdown(f"**{cfg['description']}**")
+    st.caption(cfg["capability_hint"])
+
+    if expert == "Overall Resilience Expert":
+        st.info(
+            "Operational actions are governed: the agent creates a Snowflake risk case first. "
+            "If you explicitly ask for GitHub tracking, it can then use the configured GitHub MCP integration."
         )
-    else:
-        if st.button("Overall Resilience Expert  /  Cross-domain synthesis", key="nav_orch", type="tertiary"):
-            _select(orch)
 
-    # Specialist row — always show full name with "Expert"
-    spec_cols = st.columns(4)
-    for i, name in enumerate(SPECIALISTS):
-        with spec_cols[i]:
-            if selected == name:
-                st.markdown(
-                    f"<p style='color:#e5e7eb; font-weight:600; font-size:0.93rem; margin:0; "
-                    f"border-bottom:2px solid #f87171; display:inline-block; padding-bottom:2px'>"
-                    f"{name}</p>",
-                    unsafe_allow_html=True,
-                )
-            else:
-                if st.button(name, key=f"nav_spec_{i}", type="tertiary"):
-                    _select(name)
+    return expert
 
-    st.markdown("")
 
-    # --- Single chat composer (form): always visible, above suggestions ---
-    with st.form("chat_form", clear_on_submit=True, border=False):
-        user_input = st.text_input(
-            f"Ask the {selected}...",
-            value=st.session_state.prefill,
-            placeholder=f"Ask the {selected}...",
-            label_visibility="collapsed",
+def _render_suggestions(expert_name: str) -> None:
+    """
+    Suggestions are visible only before the first submitted question.
+
+    Clicking a suggestion selects it.
+    Clicking Ask submits it.
+    Only after submission do all suggestions disappear.
+    """
+    if st.session_state.conversation_started:
+        return
+
+    cfg = EXPERTS[expert_name]
+    st.subheader("Suggested questions")
+    st.caption("Select a question, then click Ask. Suggestions disappear once the conversation starts.")
+
+    suggestions: List[str] = cfg["suggestions"]
+
+    for idx, suggestion in enumerate(suggestions):
+        is_selected = st.session_state.selected_suggestion == suggestion
+        label = f"{'✓ ' if is_selected else ''}{suggestion}"
+        if st.button(
+            label,
+            key=f"suggestion_{expert_name}_{idx}",
+            width="stretch",
+        ):
+            st.session_state.selected_suggestion = suggestion
+            st.rerun()
+
+    if st.session_state.selected_suggestion:
+        st.text_area(
+            "Selected question",
+            value=st.session_state.selected_suggestion,
+            height=80,
+            disabled=True,
         )
-        send = st.form_submit_button("Send")
 
-    # --- Suggested questions (only when no chat history) ---
-    if not st.session_state.messages:
-        st.markdown(
-            "<span style='color:#9ca3af; font-size:0.85rem'>Suggested questions</span>",
-            unsafe_allow_html=True,
-        )
-        suggestions = SUGGESTED_QUESTIONS[selected]
-        for i, q in enumerate(suggestions):
-            if st.button(f"\u2192  {q}", key=f"suggest_{i}", type="tertiary"):
-                st.session_state.prefill = q
+        ask_col, clear_col = st.columns([1, 1])
+
+        with ask_col:
+            if st.button("Ask", type="primary", width="stretch"):
+                question = st.session_state.selected_suggestion
+                st.session_state.conversation_started = True
+                st.session_state.selected_suggestion = None
+                st.session_state.pending_question = question
                 st.rerun()
 
-    st.markdown("---")
+        with clear_col:
+            if st.button("Choose another", width="stretch"):
+                st.session_state.selected_suggestion = None
+                st.rerun()
 
-    # --- Process submission (single path) ---
-    if send and user_input and user_input.strip():
-        st.session_state.prefill = ""
-        question = user_input.strip()
-        with st.chat_message("user"):
-            st.markdown(question)
-        process_question(question)
-        st.rerun()
 
-    # --- Chat history ---
+def _render_message_history() -> None:
     for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-            if msg.get("chart_key"):
-                chart = render_chart(msg["chart_key"], get_conn())
-                if chart:
-                    st.altair_chart(chart, width="stretch")
-            if msg.get("tools"):
-                st.caption(f"Tools: {', '.join(msg['tools'])}")
+        role = msg.get("role", "assistant")
+        with st.chat_message(role):
+            st.markdown(msg.get("content", ""))
+            tools = msg.get("tools") or []
+            if tools:
+                st.caption("Tools: " + ", ".join(tools))
+
+
+def _process_question(expert_name: str, question: str) -> None:
+    if not question or not question.strip():
+        return
+
+    question = question.strip()
+    st.session_state.conversation_started = True
+    st.session_state.messages.append({"role": "user", "content": question})
+
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    with st.chat_message("assistant"):
+        _render_optional_chart(expert_name, question)
+
+        with st.spinner(f"Consulting the {expert_name}..."):
+            try:
+                raw = _call_agent(EXPERTS[expert_name]["agent"], question)
+                answer, tools = _normalize_agent_response(raw)
+            except Exception as exc:
+                answer = (
+                    "I couldn't complete the agent request. "
+                    f"Details: {exc}"
+                )
+                tools = []
+
+        st.markdown(answer)
+        if tools:
+            st.caption("Tools: " + ", ".join(tools))
+
+    st.session_state.messages.append(
+        {
+            "role": "assistant",
+            "content": answer,
+            "tools": tools,
+        }
+    )
+
+
+def _render_chat_input(expert_name: str) -> None:
+    question = st.chat_input(f"Ask the {expert_name}...")
+
+    if question:
+        # Free-form submission starts the conversation immediately and hides suggestions.
+        st.session_state.conversation_started = True
+        _process_question(expert_name, question)
+
+
+def _render_risk_case_panel() -> None:
+    if render_risk_cases is None:
+        return
+
+    with st.expander("Risk Cases", expanded=False):
+        st.caption(
+            "Governed cases persisted in SUPPLY_CHAIN_DW.CONTROL.RISK_CASE. "
+            "Create cases through the Overall Resilience Expert, not by direct UI insert."
+        )
+        render_risk_cases()
+
+
+def main() -> None:
+    _init_state()
+    _render_header()
+
+    expert_name = _render_expert_selector()
+
+    # Risk-case visibility is available throughout the app, but actions stay agent-governed.
+    _render_risk_case_panel()
+
+    # Suggestions exist only before first submission.
+    _render_suggestions(expert_name)
+
+    # Existing conversation.
+    _render_message_history()
+
+    # Handle a suggestion that was explicitly confirmed with Ask.
+    pending = st.session_state.pop("pending_question", None)
+    if pending:
+        _process_question(expert_name, pending)
+
+    _render_chat_input(expert_name)
 
 
 if __name__ == "__main__":
