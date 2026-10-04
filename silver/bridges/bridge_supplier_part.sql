@@ -1,0 +1,26 @@
+-- =============================================================================
+-- BRIDGE_SUPPLIER_PART
+-- Target: SUPPLY_CHAIN_DW.SILVER.BRIDGE_SUPPLIER_PART
+-- Source: SUPPLY_CHAIN_DW.RAW.SUPPLIER_PARTS
+-- Grain:  One row per supplier + part (SUPPLIER_ID, PART_ID)
+-- Dedup:  By (SUPPLIER_ID, PART_ID) using LAST_UPDATED_AT DESC
+-- Recovered: Exact CTAS from query history (2026-09-30 11:30:53)
+-- =============================================================================
+
+CREATE OR REPLACE TABLE SUPPLY_CHAIN_DW.SILVER.BRIDGE_SUPPLIER_PART AS
+WITH dedup AS (
+  SELECT *,
+    ROW_NUMBER() OVER (PARTITION BY SUPPLIER_ID, PART_ID ORDER BY LAST_UPDATED_AT DESC) AS rn
+  FROM SUPPLY_CHAIN_DW.RAW.SUPPLIER_PARTS
+)
+SELECT
+  SUPPLIER_ID,
+  PART_ID,
+  SUPPLIER_UNIT_COST,
+  BASE_LEAD_TIME_DAYS,
+  MINIMUM_ORDER_QTY,
+  PREFERRED_SUPPLIER_FLAG,
+  ACTIVE_FLAG,
+  LAST_UPDATED_AT
+FROM dedup
+WHERE rn = 1;

@@ -1,0 +1,79 @@
+-- =============================================================================
+-- MART_LOGISTICS_PERFORMANCE — Scenario Behavioral Observations (INFORMATIONAL)
+-- Target: SUPPLY_CHAIN_DW.GOLD.MART_LOGISTICS_PERFORMANCE
+-- Run after V2.6.0 is applied and VALIDATION.SCENARIO_AFFECTED_ENTITY is loaded.
+-- =============================================================================
+--
+-- SC-000004 Logistics Disruption: 47 affected shipments.
+-- All results are informational, NOT pass/fail.
+
+-- =============================================================================
+-- 1. SC-000004: Mart-based behavioral comparison (scenario vs baseline)
+-- =============================================================================
+WITH sc4_shipments AS (
+    SELECT ENTITY_ID AS SHIPMENT_ID
+    FROM SUPPLY_CHAIN_DW.VALIDATION.SCENARIO_AFFECTED_ENTITY
+    WHERE SCENARIO_ID = 'SC-000004' AND ENTITY_TYPE = 'SHIPMENT'
+)
+SELECT
+    'SC-000004' AS SCENARIO_ID,
+    CASE WHEN s.SHIPMENT_ID IS NOT NULL THEN 'SCENARIO' ELSE 'BASELINE' END AS POPULATION,
+    COUNT(*) AS SHIPMENT_COUNT,
+    -- IS_ON_TIME distribution
+    SUM(CASE WHEN m.IS_ON_TIME = TRUE THEN 1 ELSE 0 END) AS ON_TIME_TRUE,
+    SUM(CASE WHEN m.IS_ON_TIME = FALSE THEN 1 ELSE 0 END) AS ON_TIME_FALSE,
+    SUM(CASE WHEN m.IS_ON_TIME IS NULL THEN 1 ELSE 0 END) AS ON_TIME_NULL,
+    -- Delay metrics (only for evaluable shipments)
+    ROUND(AVG(m.DELIVERY_DELAY_HOURS), 1) AS AVG_DELIVERY_DELAY_HOURS,
+    ROUND(AVG(m.DEPARTURE_DELAY_HOURS), 1) AS AVG_DEPARTURE_DELAY_HOURS,
+    ROUND(AVG(m.TRANSIT_VARIANCE_HOURS), 1) AS AVG_TRANSIT_VARIANCE_HOURS,
+    -- Event evidence
+    SUM(m.ROUTE_DEVIATION_EVENT_COUNT) AS TOTAL_ROUTE_DEVIATION_EVENTS,
+    SUM(m.DELAY_REPORTED_EVENT_COUNT) AS TOTAL_DELAY_REPORTED_EVENTS,
+    -- Cost
+    ROUND(AVG(m.SHIPPING_COST), 2) AS AVG_SHIPPING_COST,
+    -- Order impact
+    ROUND(AVG(m.DISTINCT_ORDER_COUNT), 1) AS AVG_DISTINCT_ORDER_COUNT,
+    -- Status distribution
+    SUM(CASE WHEN m.SHIPMENT_STATUS = 'DELIVERED' THEN 1 ELSE 0 END) AS DELIVERED_COUNT,
+    SUM(CASE WHEN m.SHIPMENT_STATUS = 'DELAYED' THEN 1 ELSE 0 END) AS DELAYED_COUNT
+FROM SUPPLY_CHAIN_DW.GOLD.MART_LOGISTICS_PERFORMANCE m
+LEFT JOIN sc4_shipments s ON m.SHIPMENT_ID = s.SHIPMENT_ID
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- =============================================================================
+-- 2. SC-000004: Telemetry OFF_ROUTE evidence (queried directly from Silver)
+-- This is NOT from the mart — informational validation only.
+-- =============================================================================
+WITH sc4_shipments AS (
+    SELECT ENTITY_ID AS SHIPMENT_ID
+    FROM SUPPLY_CHAIN_DW.VALIDATION.SCENARIO_AFFECTED_ENTITY
+    WHERE SCENARIO_ID = 'SC-000004' AND ENTITY_TYPE = 'SHIPMENT'
+)
+SELECT
+    'SC-000004_TELEMETRY' AS SCENARIO_ID,
+    CASE WHEN s.SHIPMENT_ID IS NOT NULL THEN 'SCENARIO' ELSE 'BASELINE' END AS POPULATION,
+    COUNT(DISTINCT vt.SHIPMENT_ID) AS SHIPMENTS_WITH_TELEMETRY,
+    SUM(CASE WHEN vt.VEHICLE_STATUS = 'OFF_ROUTE' THEN 1 ELSE 0 END) AS OFF_ROUTE_POINTS,
+    SUM(CASE WHEN vt.VEHICLE_STATUS = 'DELAYED' THEN 1 ELSE 0 END) AS DELAYED_POINTS,
+    COUNT(*) AS TOTAL_TELEMETRY_POINTS
+FROM SUPPLY_CHAIN_DW.SILVER.FACT_VEHICLE_TELEMETRY vt
+LEFT JOIN sc4_shipments s ON vt.SHIPMENT_ID = s.SHIPMENT_ID
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- =============================================================================
+-- 3. SC-000004: Route RTE-000164 behavioral comparison
+-- =============================================================================
+SELECT
+    'SC-000004_ROUTE' AS SCENARIO_ID,
+    CASE WHEN ROUTE_ID = 'RTE-000164' THEN 'RTE-000164' ELSE 'OTHER_ROUTES' END AS POPULATION,
+    COUNT(*) AS SHIPMENT_COUNT,
+    SUM(CASE WHEN IS_ON_TIME = FALSE THEN 1 ELSE 0 END) AS LATE_COUNT,
+    ROUND(AVG(DELIVERY_DELAY_HOURS), 1) AS AVG_DELIVERY_DELAY_HOURS,
+    SUM(ROUTE_DEVIATION_EVENT_COUNT) AS TOTAL_ROUTE_DEVIATIONS,
+    SUM(DELAY_REPORTED_EVENT_COUNT) AS TOTAL_DELAY_REPORTS
+FROM SUPPLY_CHAIN_DW.GOLD.MART_LOGISTICS_PERFORMANCE
+GROUP BY 1, 2
+ORDER BY 1, 2;

@@ -1,0 +1,108 @@
+-- =============================================================================
+-- MART_INVENTORY_RISK — Scenario Behavioral Observations (INFORMATIONAL)
+-- Target: SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK
+-- Run after V2.7.0 is applied and VALIDATION.SCENARIO_AFFECTED_ENTITY is loaded.
+-- =============================================================================
+--
+-- All results are informational, NOT pass/fail.
+-- Do not change mart logic based on behavioral results.
+
+-- =============================================================================
+-- 1. SC-000002: Affected inventory positions vs baseline
+-- =============================================================================
+WITH sc2_parts AS (
+    SELECT DISTINCT ENTITY_ID AS PART_ID
+    FROM SUPPLY_CHAIN_DW.VALIDATION.SCENARIO_AFFECTED_ENTITY
+    WHERE SCENARIO_ID = 'SC-000002' AND ENTITY_TYPE = 'PART'
+),
+sc2_plants AS (
+    SELECT DISTINCT ENTITY_ID AS PLANT_ID
+    FROM SUPPLY_CHAIN_DW.VALIDATION.SCENARIO_AFFECTED_ENTITY
+    WHERE SCENARIO_ID = 'SC-000002' AND ENTITY_TYPE = 'PLANT'
+),
+sc2_positions AS (
+    SELECT PLANT_ID, PART_ID
+    FROM sc2_plants CROSS JOIN sc2_parts
+)
+SELECT
+    'SC-000002' AS SCENARIO_ID,
+    CASE WHEN sp.PLANT_ID IS NOT NULL THEN 'SCENARIO' ELSE 'BASELINE' END AS POPULATION,
+    COUNT(*) AS POSITION_COUNT,
+    ROUND(AVG(m.AVAILABLE_QTY), 1) AS AVG_AVAILABLE_QTY,
+    SUM(CASE WHEN m.NEEDS_REORDER THEN 1 ELSE 0 END) AS NEEDS_REORDER_COUNT,
+    SUM(CASE WHEN m.BELOW_SAFETY_STOCK THEN 1 ELSE 0 END) AS BELOW_SAFETY_COUNT,
+    SUM(CASE WHEN m.IS_OUT_OF_STOCK THEN 1 ELSE 0 END) AS OUT_OF_STOCK_COUNT,
+    ROUND(AVG(m.SHORTAGE_QTY), 1) AS AVG_SHORTAGE_QTY,
+    ROUND(AVG(m.BELOW_SAFETY_STOCK_QTY), 1) AS AVG_BELOW_SAFETY_QTY,
+    SUM(m.OUTSTANDING_ORDER_QTY) AS TOTAL_OUTSTANDING_ORDER_QTY,
+    ROUND(SUM(m.OUTSTANDING_ORDER_VALUE), 2) AS TOTAL_OUTSTANDING_ORDER_VALUE,
+    ROUND(AVG(m.ACTIVE_SUPPLIER_COUNT), 1) AS AVG_SUPPLIER_COUNT
+FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK m
+LEFT JOIN sc2_positions sp
+    ON m.PLANT_ID = sp.PLANT_ID AND m.PART_ID = sp.PART_ID
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- =============================================================================
+-- 2. SC-000002: Criticality distribution of affected parts
+-- =============================================================================
+WITH sc2_parts AS (
+    SELECT DISTINCT ENTITY_ID AS PART_ID
+    FROM SUPPLY_CHAIN_DW.VALIDATION.SCENARIO_AFFECTED_ENTITY
+    WHERE SCENARIO_ID = 'SC-000002' AND ENTITY_TYPE = 'PART'
+)
+SELECT
+    'SC-000002_CRITICALITY' AS SCENARIO_ID,
+    CASE WHEN sp.PART_ID IS NOT NULL THEN 'SCENARIO' ELSE 'BASELINE' END AS POPULATION,
+    m.CRITICALITY,
+    COUNT(*) AS POSITION_COUNT
+FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK m
+LEFT JOIN sc2_parts sp ON m.PART_ID = sp.PART_ID
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3;
+
+-- =============================================================================
+-- 3. SC-000001 Supplier Deterioration: inventory overlap (informational)
+--    SC-000001 affects 25 parts across all 15 plants.
+-- =============================================================================
+WITH sc1_parts AS (
+    SELECT DISTINCT ENTITY_ID AS PART_ID
+    FROM SUPPLY_CHAIN_DW.VALIDATION.SCENARIO_AFFECTED_ENTITY
+    WHERE SCENARIO_ID = 'SC-000001' AND ENTITY_TYPE = 'PART'
+)
+SELECT
+    'SC-000001' AS SCENARIO_ID,
+    CASE WHEN sp.PART_ID IS NOT NULL THEN 'SCENARIO' ELSE 'BASELINE' END AS POPULATION,
+    COUNT(*) AS POSITION_COUNT,
+    ROUND(AVG(m.AVAILABLE_QTY), 1) AS AVG_AVAILABLE_QTY,
+    SUM(CASE WHEN m.NEEDS_REORDER THEN 1 ELSE 0 END) AS NEEDS_REORDER_COUNT,
+    SUM(CASE WHEN m.BELOW_SAFETY_STOCK THEN 1 ELSE 0 END) AS BELOW_SAFETY_COUNT,
+    SUM(CASE WHEN m.IS_OUT_OF_STOCK THEN 1 ELSE 0 END) AS OUT_OF_STOCK_COUNT,
+    ROUND(AVG(m.SHORTAGE_QTY), 1) AS AVG_SHORTAGE_QTY
+FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK m
+LEFT JOIN sc1_parts sp ON m.PART_ID = sp.PART_ID
+GROUP BY 1, 2
+ORDER BY 1, 2;
+
+-- =============================================================================
+-- 4. SC-000003 Plant Bottleneck: inventory overlap (informational)
+--    SC-000003 affects 1 plant with 150 parts.
+-- =============================================================================
+WITH sc3_plants AS (
+    SELECT DISTINCT ENTITY_ID AS PLANT_ID
+    FROM SUPPLY_CHAIN_DW.VALIDATION.SCENARIO_AFFECTED_ENTITY
+    WHERE SCENARIO_ID = 'SC-000003' AND ENTITY_TYPE = 'PLANT'
+)
+SELECT
+    'SC-000003' AS SCENARIO_ID,
+    CASE WHEN sp.PLANT_ID IS NOT NULL THEN 'SCENARIO' ELSE 'BASELINE' END AS POPULATION,
+    COUNT(*) AS POSITION_COUNT,
+    ROUND(AVG(m.AVAILABLE_QTY), 1) AS AVG_AVAILABLE_QTY,
+    SUM(CASE WHEN m.NEEDS_REORDER THEN 1 ELSE 0 END) AS NEEDS_REORDER_COUNT,
+    SUM(CASE WHEN m.BELOW_SAFETY_STOCK THEN 1 ELSE 0 END) AS BELOW_SAFETY_COUNT,
+    SUM(CASE WHEN m.IS_OUT_OF_STOCK THEN 1 ELSE 0 END) AS OUT_OF_STOCK_COUNT,
+    ROUND(AVG(m.SHORTAGE_QTY), 1) AS AVG_SHORTAGE_QTY
+FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK m
+LEFT JOIN sc3_plants sp ON m.PLANT_ID = sp.PLANT_ID
+GROUP BY 1, 2
+ORDER BY 1, 2;

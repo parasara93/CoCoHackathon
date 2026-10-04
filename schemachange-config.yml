@@ -1,0 +1,16 @@
+config-version: 2
+
+schemachange:
+  root-folder: "./migrations"
+
+  connection-name: "CONN"
+  connections-file-path: "C:/Users/heman/.snowflake/connections.toml"
+
+  change-history-table: "SUPPLY_CHAIN_DW.SCHEMACHANGE.CHANGE_HISTORY"
+  create-change-history-table: true
+
+  autocommit: true
+
+snowflake:
+  database: "SUPPLY_CHAIN_DW"
+  schema: "SCHEMACHANGE"

@@ -1,0 +1,29 @@
+-- =============================================================================
+-- V1.0.0 — Baseline Silver Layer (no-op marker)
+-- =============================================================================
+--
+-- Purpose:
+--   This migration establishes the validated Silver baseline as the starting
+--   point for schemachange version tracking.  It contains no executable DDL
+--   because the 15 Silver objects already exist in SUPPLY_CHAIN_DW.SILVER.
+--
+-- How it works:
+--   schemachange executes this file (which is a no-op) and automatically
+--   records version 1.0.0 in the CHANGE_HISTORY table.  All future
+--   migrations start from V1.1.0 or higher.
+--
+-- Objects covered (15):
+--   Dimensions: DIM_CARRIER, DIM_CUSTOMER, DIM_DATE, DIM_PART, DIM_PLANT,
+--               DIM_ROUTE, DIM_SUPPLIER
+--   Facts:      FACT_INVENTORY_SNAPSHOT, FACT_ORDER_LINE, FACT_SHIPMENT,
+--               FACT_SHIPMENT_EVENT, FACT_SHIPMENT_LINE,
+--               FACT_SUPPLIER_PERFORMANCE, FACT_VEHICLE_TELEMETRY
+--   Bridges:    BRIDGE_SUPPLIER_PART
+--
+-- The original CREATE OR REPLACE TABLE statements are preserved in the
+-- silver/ directory (dimensions/, facts/, bridges/).
+-- =============================================================================
+
+-- No-op: Silver layer already exists and has been validated.
+-- Future migrations start at V1.1.0 or higher.
+SELECT 1;
