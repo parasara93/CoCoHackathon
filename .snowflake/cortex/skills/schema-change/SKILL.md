@@ -1,6 +1,6 @@
 ---
 name: schema-change
-description: Workflow for any persistent Snowflake schema or object change managed through schemachange migrations. Use when creating, altering, replacing, or dropping tables, views, functions, procedures, streams, tasks, or any tracked DDL.
+description: Workflow for persistent Snowflake DDL/object-definition changes, including initial environment/bootstrap creation in a new account, managed through schemachange migrations. Use when creating, altering, replacing, or dropping tables, views, functions, procedures, streams, tasks, or any tracked DDL. Not required for pure data loading, COPY INTO, historical replay, MERGE execution, audit logging, reconciliation, or validations when no object definitions change.
 ---
 
 # Schema Change
@@ -17,6 +17,7 @@ This skill handles **lower-level persistent DDL** that is not itself a Gold anal
 
 **Use this skill when** the request is primarily about:
 
+- Initial environment/bootstrap creation (databases, schemas, storage integrations, stages, file formats, audit/control tables) in a new or empty Snowflake account
 - Silver-layer structural changes (add/alter/drop columns, new Silver tables)
 - Infrastructure objects (schemas, grants, stages, file formats)
 - Procedural objects (functions, procedures, streams, tasks)
@@ -40,6 +41,13 @@ Do **not** use this skill for:
 - Validation-only runs (use the validation SQL directly)
 - Changes to the schemachange configuration itself
 - Gold analytical mart creation or modification (use `build-and-validate-mart`)
+- Pure data loading (COPY INTO, PUT, batch inserts) that does not change object definitions
+- Historical replay or CDC execution (MERGE, upsert) that operates on existing objects
+- Audit logging, reconciliation queries, or validation execution when no DDL is involved
+
+If a CDC or replay task requires creating or altering tables, streams, tasks, procedures, stages, file formats, or control/audit objects, use this skill for those DDL changes only. The subsequent data loading, MERGE execution, and validation runs are DML/orchestration work and do not require this skill.
+
+For mixed DDL + DML tasks, apply this skill only to the DDL/object-definition portion. Subsequent operations such as COPY INTO, historical data loading, replay, MERGE execution, reconciliation, and validation remain outside the schema-change workflow unless they themselves require an object-definition change.
 
 ## Workflow
 

@@ -9,40 +9,38 @@
 -- =============================================================================
 
 -- =============================================================================
--- S1: SUPPLIER DETERIORATION
--- Expected: Some suppliers show declining quality_score and on_time_delivery_pct
---           over time, with risk_score increasing.
+-- S1: SUPPLIER DETERIORATION (SUP-000016)
+-- Generator logic: deterioration window starts at perf_dates[len//3], degrading
+-- risk_score (+0.25-0.5), fill_rate_pct (*0.5-0.75), on_time_delivery_pct (*0.4-0.7).
+-- Ground truth: scenario period 2025-11-30 to 2026-03-30.
+-- Pre-deterioration measurements: before 2025-11-30 (normal baseline).
+-- During-deterioration measurements: >= 2025-11-30 (degraded metrics).
 -- =============================================================================
 
--- Check: at least one supplier has a measurable quality decline
--- (first-half avg quality > second-half avg quality by meaningful margin)
-SELECT 'S1: Supplier quality deterioration visible' AS check_name,
-       COUNT(*) AS suppliers_with_decline,
-       CASE WHEN COUNT(*) > 0 THEN 'PASS' ELSE 'FAIL' END AS result
+-- Check: SUP-000016 shows fill_rate collapse during deterioration vs baseline
+SELECT 'S1: Supplier fill rate deterioration visible' AS check_name,
+       pre_fill_rate AS pre_deterioration_fill_rate,
+       during_fill_rate AS during_deterioration_fill_rate,
+       CASE WHEN pre_fill_rate - during_fill_rate > 0.15 THEN 'PASS' ELSE 'FAIL' END AS result
 FROM (
   SELECT
-    SUPPLIER_ID,
-    AVG(CASE WHEN MEASUREMENT_DATE_KEY < '2026-04-01' THEN QUALITY_SCORE END) AS early_quality,
-    AVG(CASE WHEN MEASUREMENT_DATE_KEY >= '2026-04-01' THEN QUALITY_SCORE END) AS late_quality
+    AVG(CASE WHEN MEASUREMENT_DATE_KEY < '2025-11-30' THEN FILL_RATE_PCT END) AS pre_fill_rate,
+    AVG(CASE WHEN MEASUREMENT_DATE_KEY >= '2025-11-30' THEN FILL_RATE_PCT END) AS during_fill_rate
   FROM SUPPLY_CHAIN_DW.SILVER.FACT_SUPPLIER_PERFORMANCE
-  GROUP BY SUPPLIER_ID
-  HAVING early_quality IS NOT NULL AND late_quality IS NOT NULL
-     AND early_quality - late_quality > 0.05
+  WHERE SUPPLIER_ID = 'SUP-000016'
 );
 
--- Check: at least one supplier has increasing risk score
+-- Check: SUP-000016 shows risk_score escalation during deterioration vs baseline
 SELECT 'S1: Supplier risk escalation visible' AS check_name,
-       COUNT(*) AS suppliers_with_escalation,
-       CASE WHEN COUNT(*) > 0 THEN 'PASS' ELSE 'FAIL' END AS result
+       pre_risk AS pre_deterioration_risk,
+       during_risk AS during_deterioration_risk,
+       CASE WHEN during_risk - pre_risk > 0.20 THEN 'PASS' ELSE 'FAIL' END AS result
 FROM (
   SELECT
-    SUPPLIER_ID,
-    AVG(CASE WHEN MEASUREMENT_DATE_KEY < '2026-04-01' THEN RISK_SCORE END) AS early_risk,
-    AVG(CASE WHEN MEASUREMENT_DATE_KEY >= '2026-04-01' THEN RISK_SCORE END) AS late_risk
+    AVG(CASE WHEN MEASUREMENT_DATE_KEY < '2025-11-30' THEN RISK_SCORE END) AS pre_risk,
+    AVG(CASE WHEN MEASUREMENT_DATE_KEY >= '2025-11-30' THEN RISK_SCORE END) AS during_risk
   FROM SUPPLY_CHAIN_DW.SILVER.FACT_SUPPLIER_PERFORMANCE
-  GROUP BY SUPPLIER_ID
-  HAVING early_risk IS NOT NULL AND late_risk IS NOT NULL
-     AND late_risk - early_risk > 0.05
+  WHERE SUPPLIER_ID = 'SUP-000016'
 );
 
 -- =============================================================================
@@ -66,26 +64,30 @@ SELECT 'S2: Below safety stock items present' AS check_name,
 FROM SUPPLY_CHAIN_DW.SILVER.FACT_INVENTORY_SNAPSHOT;
 
 -- =============================================================================
--- S3: PLANT BOTTLENECK
--- Expected: Some plants have disproportionately high order volumes relative
---           to capacity, creating visible congestion patterns.
+-- S3: PLANT BOTTLENECK (PLT-000003)
+-- Generator logic: bottleneck window 50-75% of timeline (~2026-04-01 to 2026-07-01).
+-- Reserves 70-95% of on-hand inventory at PLT-000003 (→ CRITICAL/OUT_OF_STOCK).
+-- Stalls CREATED/CONFIRMED orders to PROCESSING.
+-- Validates the encoded signals: elevated PROCESSING orders + inventory pressure.
 -- =============================================================================
 
--- Check: at least one plant has order volume exceeding capacity proxy
+-- Check: PLT-000003 has a higher proportion of PROCESSING/PARTIALLY_SHIPPED orders
+-- than the average across all other plants (bottleneck creates order backlog)
 SELECT 'S3: Plant bottleneck pattern visible' AS check_name,
-       COUNT(*) AS congested_plants,
-       CASE WHEN COUNT(*) > 0 THEN 'PASS' ELSE 'FAIL' END AS result
-FROM (
-  SELECT
-    f.PLANT_ID,
-    p.CAPACITY_UNITS,
-    COUNT(DISTINCT f.ORDER_ID) AS order_count,
-    SUM(f.ORDERED_QTY) AS total_qty_ordered
-  FROM SUPPLY_CHAIN_DW.SILVER.FACT_ORDER_LINE f
-  JOIN SUPPLY_CHAIN_DW.SILVER.DIM_PLANT p ON f.PLANT_ID = p.PLANT_ID
-  GROUP BY f.PLANT_ID, p.CAPACITY_UNITS
-  HAVING total_qty_ordered > CAPACITY_UNITS * 10
-);
+       ROUND(SUM(CASE WHEN PLANT_ID = 'PLT-000003' AND ORDER_STATUS IN ('PROCESSING','PARTIALLY_SHIPPED') THEN 1 ELSE 0 END)
+             * 100.0 / NULLIF(SUM(CASE WHEN PLANT_ID = 'PLT-000003' THEN 1 ELSE 0 END), 0), 1)
+         AS pct_stalled_at_target_plant,
+       ROUND(SUM(CASE WHEN PLANT_ID != 'PLT-000003' AND ORDER_STATUS IN ('PROCESSING','PARTIALLY_SHIPPED') THEN 1 ELSE 0 END)
+             * 100.0 / NULLIF(SUM(CASE WHEN PLANT_ID != 'PLT-000003' THEN 1 ELSE 0 END), 0), 1)
+         AS pct_stalled_at_other_plants,
+       CASE WHEN
+         SUM(CASE WHEN PLANT_ID = 'PLT-000003' AND ORDER_STATUS IN ('PROCESSING','PARTIALLY_SHIPPED') THEN 1 ELSE 0 END)
+           * 1.0 / NULLIF(SUM(CASE WHEN PLANT_ID = 'PLT-000003' THEN 1 ELSE 0 END), 0)
+         >
+         SUM(CASE WHEN PLANT_ID != 'PLT-000003' AND ORDER_STATUS IN ('PROCESSING','PARTIALLY_SHIPPED') THEN 1 ELSE 0 END)
+           * 1.0 / NULLIF(SUM(CASE WHEN PLANT_ID != 'PLT-000003' THEN 1 ELSE 0 END), 0)
+       THEN 'PASS' ELSE 'FAIL' END AS result
+FROM SUPPLY_CHAIN_DW.SILVER.FACT_ORDER_LINE;
 
 -- =============================================================================
 -- S4: LOGISTICS DISRUPTION
@@ -102,11 +104,12 @@ WHERE IS_ON_TIME = FALSE
   AND ACTUAL_TRANSIT_HOURS > PLANNED_TRANSIT_HOURS * 1.2;
 
 -- Check: shipment events show disruption-type events
+-- Generator injects DELAY_REPORTED and ROUTE_DEVIATION events for disrupted shipments
 SELECT 'S4: Disruption-related shipment events present' AS check_name,
        COUNT(*) AS disruption_events,
        CASE WHEN COUNT(*) > 0 THEN 'PASS' ELSE 'FAIL' END AS result
 FROM SUPPLY_CHAIN_DW.SILVER.FACT_SHIPMENT_EVENT
-WHERE EVENT_TYPE IN ('DELAY', 'EXCEPTION', 'REROUTE', 'WEATHER_DELAY', 'CUSTOMS_HOLD');
+WHERE EVENT_TYPE IN ('DELAY_REPORTED', 'ROUTE_DEVIATION');
 
 -- Check: telemetry shows stopped vehicles (speed 0 for extended periods)
 SELECT 'S4: Vehicle telemetry shows stopped vehicles' AS check_name,
@@ -149,55 +152,55 @@ FROM (
 
 -- Order lines dedup: Silver should have fewer rows than RAW
 SELECT 'DEDUP: ORDER_LINES' AS check_name,
-       (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.ORDER_LINES) AS raw_count,
+       (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.ORDER_LINES) AS raw_count,
        (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_ORDER_LINE) AS silver_count,
        CASE WHEN (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_ORDER_LINE) <=
-                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.ORDER_LINES)
+                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.ORDER_LINES)
             THEN 'PASS' ELSE 'FAIL' END AS result;
 
 -- Shipments dedup
 SELECT 'DEDUP: SHIPMENTS' AS check_name,
-       (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.SHIPMENTS) AS raw_count,
+       (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.SHIPMENTS) AS raw_count,
        (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_SHIPMENT) AS silver_count,
        CASE WHEN (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_SHIPMENT) <=
-                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.SHIPMENTS)
+                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.SHIPMENTS)
             THEN 'PASS' ELSE 'FAIL' END AS result;
 
 -- Inventory dedup
 SELECT 'DEDUP: INVENTORY' AS check_name,
-       (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.INVENTORY) AS raw_count,
+       (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.INVENTORY) AS raw_count,
        (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_INVENTORY_SNAPSHOT) AS silver_count,
        CASE WHEN (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_INVENTORY_SNAPSHOT) <=
-                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.INVENTORY)
+                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.INVENTORY)
             THEN 'PASS' ELSE 'FAIL' END AS result;
 
 -- Supplier performance dedup
 SELECT 'DEDUP: SUPPLIER_PERFORMANCE' AS check_name,
-       (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.SUPPLIER_PERFORMANCE) AS raw_count,
+       (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.SUPPLIER_PERFORMANCE) AS raw_count,
        (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_SUPPLIER_PERFORMANCE) AS silver_count,
        CASE WHEN (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_SUPPLIER_PERFORMANCE) <=
-                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.SUPPLIER_PERFORMANCE)
+                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.SUPPLIER_PERFORMANCE)
             THEN 'PASS' ELSE 'FAIL' END AS result;
 
 -- Supplier parts dedup
 SELECT 'DEDUP: SUPPLIER_PARTS' AS check_name,
-       (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.SUPPLIER_PARTS) AS raw_count,
+       (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.SUPPLIER_PARTS) AS raw_count,
        (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.BRIDGE_SUPPLIER_PART) AS silver_count,
        CASE WHEN (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.BRIDGE_SUPPLIER_PART) <=
-                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.SUPPLIER_PARTS)
+                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.SUPPLIER_PARTS)
             THEN 'PASS' ELSE 'FAIL' END AS result;
 
 -- History tables: Silver count should equal RAW count (no dedup)
 SELECT 'NO_DEDUP: SHIPMENT_EVENTS' AS check_name,
-       (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.SHIPMENT_EVENTS) AS raw_count,
+       (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.SHIPMENT_EVENTS) AS raw_count,
        (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_SHIPMENT_EVENT) AS silver_count,
        CASE WHEN (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_SHIPMENT_EVENT) =
-                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.SHIPMENT_EVENTS)
+                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.SHIPMENT_EVENTS)
             THEN 'PASS' ELSE 'FAIL' END AS result;
 
 SELECT 'NO_DEDUP: VEHICLE_TELEMETRY' AS check_name,
-       (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.VEHICLE_TELEMETRY) AS raw_count,
+       (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.VEHICLE_TELEMETRY) AS raw_count,
        (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_VEHICLE_TELEMETRY) AS silver_count,
        CASE WHEN (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.SILVER.FACT_VEHICLE_TELEMETRY) =
-                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_RAW_DATASET.RAW.VEHICLE_TELEMETRY)
+                 (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.RAW.VEHICLE_TELEMETRY)
             THEN 'PASS' ELSE 'FAIL' END AS result;

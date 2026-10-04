@@ -1,7 +1,7 @@
 -- =============================================================================
 -- DIM_CUSTOMER
 -- Target: SUPPLY_CHAIN_DW.SILVER.DIM_CUSTOMER
--- Source: SUPPLY_CHAIN_RAW_DATASET.RAW.CUSTOMERS
+-- Source: SUPPLY_CHAIN_DW.RAW.CUSTOMERS
 -- Grain:  One row per customer (CUSTOMER_ID)
 -- Dedup:  N/A — CUSTOMERS is a static reference table
 -- Recovered: Exact CTAS from query history (2026-09-29 23:39:06)
@@ -18,4 +18,4 @@ SELECT
   LATITUDE,
   LONGITUDE,
   CREATED_AT
-FROM SUPPLY_CHAIN_RAW_DATASET.RAW.CUSTOMERS;
+FROM SUPPLY_CHAIN_DW.RAW.CUSTOMERS;

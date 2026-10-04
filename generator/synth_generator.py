@@ -8,9 +8,10 @@ Follows DATA_GENERATION_CONTRACT.md v1.0 exactly.
 from __future__ import annotations
 
 import random
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Set
 
 import pandas as pd
 
@@ -395,9 +396,20 @@ def _pick_geo(rng: random.Random):
     return rng.choice(_GEO)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 5. ERP Domain Generators
-# ═══════════════════════════════════════════════════════════════════════════
+def _stable_vehicle_id(shipment_id: str) -> str:
+    """Stable across Python processes/reruns; unlike built-in hash()."""
+    digest = hashlib.sha256(str(shipment_id).encode("utf-8")).hexdigest()
+    return f"VEH-{int(digest[:12], 16) % 100_000:05d}"
+
+
+def _inventory_status(available_qty: float, safety_stock: float, reorder_point: float) -> str:
+    if available_qty <= 0:
+        return "OUT_OF_STOCK"
+    if available_qty < safety_stock:
+        return "CRITICAL"
+    if available_qty < reorder_point:
+        return "LOW"
+    return "ADEQUATE"
 
 def gen_customers(cfg: GeneratorConfig, rng: random.Random) -> pd.DataFrame:
     rows = []
@@ -440,84 +452,80 @@ def gen_orders(
     rows = []
     for i in range(1, cfg.counts["orders"] + 1):
         od = _rand_ts(rng, cfg.timeline_start, cfg.timeline_end)
-        rdd = (od + timedelta(days=rng.randint(5, 45))).date()
+        rdd = (od + timedelta(days=rng.randint(7, 35))).date()
         rows.append({
             "order_id": _id("ORD", i),
             "customer_id": rng.choice(cust_ids),
             "plant_id": rng.choice(plant_ids),
             "order_date": od,
             "requested_delivery_date": rdd,
-            "order_status": rng.choice(ORDER_STATUSES),
-            "order_total": 0.0,  # backfilled after order_lines
+            # Final status is derived after shipment allocation.
+            "order_status": "CONFIRMED",
+            "order_total": 0.0,
             "last_updated_at": od,
         })
     return pd.DataFrame(rows)
 
-
 def gen_order_lines(
     cfg: GeneratorConfig, rng: random.Random,
-    orders: pd.DataFrame, parts: pd.DataFrame,
+    orders: pd.DataFrame, parts: pd.DataFrame, inventory: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    part_ids = parts["part_id"].tolist()
     std_costs = dict(zip(parts["part_id"], parts["standard_cost"]))
+    all_parts = parts["part_id"].tolist()
     max_lines = cfg.counts["order_lines_per_order_max"]
-    n_orders = len(orders)
 
-    # Pre-generate line counts per order
-    line_counts = [rng.randint(1, max_lines) for _ in range(n_orders)]
-    total_lines = sum(line_counts)
+    plant_parts: Dict[str, List[str]] = {}
+    if inventory is not None and not inventory.empty:
+        for plant_id, grp in inventory.groupby("plant_id"):
+            plant_parts[str(plant_id)] = grp["part_id"].tolist()
 
-    # Pre-allocate arrays
-    ol_ids = [None] * total_lines
-    ol_order_ids = [None] * total_lines
-    ol_part_ids = [None] * total_lines
-    ol_qtys = [0] * total_lines
-    ol_prices = [0.0] * total_lines
-    ol_amounts = [0.0] * total_lines
-    ol_statuses = [None] * total_lines
-    ol_created = [None] * total_lines
-    ol_updated = [None] * total_lines
+    # Bias toward 1-3 lines rather than a uniform 1..max distribution.
+    weights = [0.34, 0.29, 0.20, 0.11, 0.06][:max_lines]
+    total = sum(weights)
+    weights = [w / total for w in weights]
 
-    order_ids_arr = orders["order_id"].tolist()
-    order_statuses_arr = orders["order_status"].tolist()
-    order_dates_arr = orders["order_date"].tolist()
-    order_updated_arr = orders["last_updated_at"].tolist()
-
+    rows = []
     seq = 0
-    for i in range(n_orders):
-        n = line_counts[i]
-        chosen = rng.sample(part_ids, min(n, len(part_ids)))
-        oid = order_ids_arr[i]
-        ostatus = order_statuses_arr[i]
-        odate = order_dates_arr[i]
-        oupdated = order_updated_arr[i]
+    for _, o in orders.iterrows():
+        n = rng.choices(list(range(1, max_lines + 1)), weights=weights, k=1)[0]
+        candidates = plant_parts.get(str(o["plant_id"]), all_parts)
+        n = min(n, len(candidates))
+        chosen = rng.sample(candidates, n)
         for pid in chosen:
-            qty = rng.randint(1, 100)
-            price = round(std_costs[pid] * rng.uniform(1.0, 1.5), 2)
-            ol_ids[seq] = _id("OL", seq + 1)
-            ol_order_ids[seq] = oid
-            ol_part_ids[seq] = pid
-            ol_qtys[seq] = qty
-            ol_prices[seq] = price
-            ol_amounts[seq] = round(qty * price, 2)
-            ol_statuses[seq] = ostatus
-            ol_created[seq] = odate
-            ol_updated[seq] = oupdated
             seq += 1
+            qty = rng.randint(1, 100)
+            price = round(std_costs[pid] * rng.uniform(1.05, 1.45), 2)
+            rows.append({
+                "order_line_id": _id("OL", seq),
+                "order_id": o["order_id"],
+                "part_id": pid,
+                "ordered_qty": qty,
+                "unit_price": price,
+                "line_amount": round(qty * price, 2),
+                "line_status": "CONFIRMED",
+                "created_at": o["order_date"],
+                "last_updated_at": o["last_updated_at"],
+            })
 
-    # Trim to actual count (in case min(n, len(part_ids)) reduced some)
-    return pd.DataFrame({
-        "order_line_id": ol_ids[:seq],
-        "order_id": ol_order_ids[:seq],
-        "part_id": ol_part_ids[:seq],
-        "ordered_qty": ol_qtys[:seq],
-        "unit_price": ol_prices[:seq],
-        "line_amount": ol_amounts[:seq],
-        "line_status": ol_statuses[:seq],
-        "created_at": ol_created[:seq],
-        "last_updated_at": ol_updated[:seq],
-    })
+    out = pd.DataFrame(rows)
+    if out.empty:
+        return out
 
+    # Cancellation is a branch, not an end-stage progression.
+    # ~3% full cancellations; ~4% partial cancellations where possible.
+    order_ids = orders["order_id"].tolist()
+    full_cancel = set(rng.sample(order_ids, max(1, int(len(order_ids) * 0.03)))) if order_ids else set()
+    remaining = [x for x in order_ids if x not in full_cancel]
+    partial_cancel = set(rng.sample(remaining, min(len(remaining), max(1, int(len(order_ids) * 0.04))))) if remaining else set()
+
+    if full_cancel:
+        out.loc[out["order_id"].isin(full_cancel), "line_status"] = "CANCELLED"
+    for oid in partial_cancel:
+        idxs = list(out.index[out["order_id"] == oid])
+        if len(idxs) >= 2:
+            out.at[rng.choice(idxs), "line_status"] = "CANCELLED"
+
+    return out
 
 def gen_inventory(
     cfg: GeneratorConfig, rng: random.Random,
@@ -530,19 +538,20 @@ def gen_inventory(
         n = min(cfg.counts["parts_per_plant_max"], len(part_ids))
         assigned = rng.sample(part_ids, n)
         for pid in assigned:
-            on_hand = rng.randint(0, 5000)
-            reserved = rng.randint(0, on_hand)
-            avail = on_hand - reserved
+            # Healthy baseline: most positions comfortably above reorder point.
             safety = rng.randint(20, 300)
-            reorder = safety + rng.randint(50, 200)
-            if avail <= 0:
-                status = "OUT_OF_STOCK"
-            elif avail < safety:
-                status = "CRITICAL"
-            elif avail < reorder:
-                status = "LOW"
+            reorder = safety + rng.randint(50, 220)
+            p = rng.random()
+            if p < 0.02:
+                avail = 0
+            elif p < 0.08:
+                avail = rng.randint(1, max(1, safety - 1))
+            elif p < 0.18:
+                avail = rng.randint(safety, max(safety, reorder - 1))
             else:
-                status = "ADEQUATE"
+                avail = rng.randint(reorder, reorder + 3500)
+            reserved = rng.randint(0, 300)
+            on_hand = avail + reserved
             rows.append({
                 "plant_id": plid,
                 "part_id": pid,
@@ -551,15 +560,10 @@ def gen_inventory(
                 "available_qty": avail,
                 "safety_stock": safety,
                 "reorder_point": reorder,
-                "inventory_status": status,
+                "inventory_status": _inventory_status(avail, safety, reorder),
                 "last_updated_at": _rand_ts(rng, cfg.timeline_start, cfg.timeline_end),
             })
     return pd.DataFrame(rows)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 6. Supplier Domain Generators
-# ═══════════════════════════════════════════════════════════════════════════
 
 def gen_suppliers(cfg: GeneratorConfig, rng: random.Random) -> pd.DataFrame:
     rows = []
@@ -598,28 +602,35 @@ def gen_supplier_parts(
     sup_ids = suppliers["supplier_id"].tolist()
     part_ids = parts["part_id"].tolist()
     std_costs = dict(zip(parts["part_id"], parts["standard_cost"]))
-    rows = []
-    # track preferred flags per part
-    preferred_assigned: Dict[str, bool] = {}
-    for sid in sup_ids:
-        n = min(cfg.counts["parts_per_supplier_max"], len(part_ids))
-        assigned = rng.sample(part_ids, n)
-        for pid in assigned:
-            is_pref = not preferred_assigned.get(pid, False)
-            if is_pref:
-                preferred_assigned[pid] = True
-            rows.append({
-                "supplier_id": sid,
-                "part_id": pid,
-                "supplier_unit_cost": round(std_costs[pid] * rng.uniform(0.8, 1.3), 2),
-                "base_lead_time_days": rng.randint(1, 45),
-                "minimum_order_qty": rng.choice([1, 10, 25, 50, 100]),
-                "preferred_supplier_flag": is_pref,
-                "active_flag": True,
-                "last_updated_at": _rand_ts(rng, cfg.timeline_start, cfg.timeline_end),
-            })
-    return pd.DataFrame(rows)
+    assigned_pairs: Set[Tuple[str, str]] = set()
+    preferred_for_part: Dict[str, str] = {}
 
+    # Pass 1: every part receives at least one active/preferred supplier.
+    for pid in part_ids:
+        sid = rng.choice(sup_ids)
+        assigned_pairs.add((sid, pid))
+        preferred_for_part[pid] = sid
+
+    # Pass 2: add secondary suppliers while roughly respecting the existing scale.
+    target_pairs = min(len(sup_ids) * cfg.counts["parts_per_supplier_max"], len(sup_ids) * len(part_ids))
+    attempts = 0
+    while len(assigned_pairs) < target_pairs and attempts < target_pairs * 20:
+        attempts += 1
+        assigned_pairs.add((rng.choice(sup_ids), rng.choice(part_ids)))
+
+    rows = []
+    for sid, pid in sorted(assigned_pairs):
+        rows.append({
+            "supplier_id": sid,
+            "part_id": pid,
+            "supplier_unit_cost": round(std_costs[pid] * rng.uniform(0.82, 1.20), 2),
+            "base_lead_time_days": rng.randint(2, 35),
+            "minimum_order_qty": rng.choice([1, 10, 25, 50, 100]),
+            "preferred_supplier_flag": preferred_for_part[pid] == sid,
+            "active_flag": True,
+            "last_updated_at": _rand_ts(rng, cfg.timeline_start, cfg.timeline_end),
+        })
+    return pd.DataFrame(rows)
 
 def gen_supplier_performance(
     cfg: GeneratorConfig, rng: random.Random,
@@ -630,11 +641,17 @@ def gen_supplier_performance(
     rows = []
     seq = 0
     for sid in sup_ids:
-        base_lead = rng.uniform(5, 25)
-        base_otd = rng.uniform(0.80, 0.99)
-        base_qual = rng.uniform(0.85, 1.0)
-        base_fill = rng.uniform(0.88, 1.0)
-        base_risk = rng.uniform(0.0, 0.3)
+        # Stable healthy majority, moderate minority, small weak cohort.
+        cohort_roll = rng.random()
+        if cohort_roll < 0.75:
+            base_lead = rng.uniform(5, 14); base_otd = rng.uniform(0.91, 0.99)
+            base_qual = rng.uniform(0.93, 0.995); base_fill = rng.uniform(0.93, 0.995); base_risk = rng.uniform(0.03, 0.18)
+        elif cohort_roll < 0.93:
+            base_lead = rng.uniform(10, 20); base_otd = rng.uniform(0.82, 0.93)
+            base_qual = rng.uniform(0.88, 0.96); base_fill = rng.uniform(0.86, 0.95); base_risk = rng.uniform(0.15, 0.35)
+        else:
+            base_lead = rng.uniform(16, 28); base_otd = rng.uniform(0.72, 0.86)
+            base_qual = rng.uniform(0.82, 0.92); base_fill = rng.uniform(0.80, 0.90); base_risk = rng.uniform(0.30, 0.50)
         for m in range(months):
             seq += 1
             mdate = (cfg.timeline_start + timedelta(days=30 * m)).date()
@@ -642,19 +659,14 @@ def gen_supplier_performance(
                 "supplier_performance_id": _id("SP", seq),
                 "supplier_id": sid,
                 "measurement_date": mdate,
-                "avg_lead_time_days": round(base_lead + rng.uniform(-2, 2), 1),
-                "on_time_delivery_pct": round(min(1.0, max(0, base_otd + rng.uniform(-0.05, 0.05))), 3),
-                "quality_score": round(min(1.0, max(0, base_qual + rng.uniform(-0.03, 0.03))), 3),
-                "fill_rate_pct": round(min(1.0, max(0, base_fill + rng.uniform(-0.04, 0.04))), 3),
-                "risk_score": round(min(1.0, max(0, base_risk + rng.uniform(-0.05, 0.05))), 3),
+                "avg_lead_time_days": round(max(1, base_lead + rng.uniform(-1.5, 1.5)), 1),
+                "on_time_delivery_pct": round(min(1.0, max(0, base_otd + rng.uniform(-0.025, 0.025))), 3),
+                "quality_score": round(min(1.0, max(0, base_qual + rng.uniform(-0.02, 0.02))), 3),
+                "fill_rate_pct": round(min(1.0, max(0, base_fill + rng.uniform(-0.025, 0.025))), 3),
+                "risk_score": round(min(1.0, max(0, base_risk + rng.uniform(-0.035, 0.035))), 3),
                 "last_updated_at": _rand_ts(rng, cfg.timeline_start, cfg.timeline_end),
             })
     return pd.DataFrame(rows)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 7. Logistics Domain Generators
-# ═══════════════════════════════════════════════════════════════════════════
 
 def gen_carriers(cfg: GeneratorConfig, rng: random.Random) -> pd.DataFrame:
     rows = []
@@ -675,8 +687,6 @@ def gen_routes(
     cfg: GeneratorConfig, rng: random.Random,
     plants: pd.DataFrame, suppliers: pd.DataFrame, customers: pd.DataFrame,
 ) -> pd.DataFrame:
-    # Build coordinate lookup: entity_type+id -> (lat, lon)
-    # Suppliers lack lat/lon columns, so resolve from city via _GEO
     _geo_city_coords = {city: (lat, lon) for city, _, _, lat, lon in _GEO}
     coords: Dict[Tuple[str, str], Tuple[float, float]] = {}
     for _, r in suppliers.iterrows():
@@ -688,41 +698,53 @@ def gen_routes(
     for _, r in customers.iterrows():
         coords[("CUSTOMER", r["customer_id"])] = (r["latitude"], r["longitude"])
 
-    pool = list(coords.keys())
+    supplier_nodes = [k for k in coords if k[0] == "SUPPLIER"]
+    plant_nodes = [k for k in coords if k[0] == "PLANT"]
+    customer_nodes = [k for k in coords if k[0] == "CUSTOMER"]
     rows = []
+    seen_pairs = set()
     for i in range(1, cfg.counts["routes"] + 1):
-        origin = rng.choice(pool)
-        dest = rng.choice(pool)
-        while dest == origin:
-            dest = rng.choice(pool)
+        roll = rng.random()
+        if roll < 0.44:
+            origin, dest = rng.choice(supplier_nodes), rng.choice(plant_nodes)
+        elif roll < 0.96:
+            origin, dest = rng.choice(plant_nodes), rng.choice(customer_nodes)
+        else:
+            origin, dest = rng.choice(plant_nodes), rng.choice(plant_nodes)
+            while dest == origin:
+                dest = rng.choice(plant_nodes)
+        # Duplicate endpoint pairs are acceptable as alternate service routes, but avoid exact repeats when possible.
+        for _ in range(8):
+            if (origin, dest) not in seen_pairs:
+                break
+            if origin[0] == "SUPPLIER":
+                origin, dest = rng.choice(supplier_nodes), rng.choice(plant_nodes)
+            elif dest[0] == "CUSTOMER":
+                origin, dest = rng.choice(plant_nodes), rng.choice(customer_nodes)
+            else:
+                origin, dest = rng.choice(plant_nodes), rng.choice(plant_nodes)
+                while dest == origin:
+                    dest = rng.choice(plant_nodes)
+        seen_pairs.add((origin, dest))
 
-        o_lat, o_lon = coords[origin]
-        d_lat, d_lon = coords[dest]
-        straight_km = _haversine(o_lat, o_lon, d_lat, d_lon)
-        # Minimum 50 km for very short routes (same-city endpoints)
-        straight_km = max(straight_km, 50.0)
-        # Route multiplier: roads/shipping lanes are longer than straight-line
-        route_mult = rng.uniform(1.2, 1.8)
-        distance_km = round(straight_km * route_mult)
-
-        # Derive transit hours from distance using a plausible avg speed
-        # Speed range: 40-90 km/h (truck/rail mix with handling time)
-        avg_speed = rng.uniform(40, 90)
-        transit_hours = max(2, round(distance_km / avg_speed))
-
+        o_lat, o_lon = coords[origin]; d_lat, d_lon = coords[dest]
+        straight_km = max(_haversine(o_lat, o_lon, d_lat, d_lon), 50.0)
+        distance_km = round(straight_km * rng.uniform(1.12, 1.55))
+        if origin[0] == "SUPPLIER":
+            avg_speed = rng.uniform(35, 75)
+        else:
+            avg_speed = rng.uniform(40, 85)
+        transit_hours = max(2, round(distance_km / avg_speed + rng.uniform(1, 8)))
         rows.append({
             "route_id": _id("RTE", i),
-            "origin_type": origin[0],
-            "origin_id": origin[1],
-            "destination_type": dest[0],
-            "destination_id": dest[1],
+            "origin_type": origin[0], "origin_id": origin[1],
+            "destination_type": dest[0], "destination_id": dest[1],
             "distance_km": distance_km,
             "expected_transit_hours": transit_hours,
-            "route_risk_level": rng.choice(ROUTE_RISK_LEVELS),
+            "route_risk_level": rng.choices(ROUTE_RISK_LEVELS, weights=[0.65, 0.28, 0.07], k=1)[0],
             "created_at": _rand_ts(rng, cfg.timeline_start, cfg.timeline_start + timedelta(days=7)),
         })
     return pd.DataFrame(rows)
-
 
 def gen_shipments(
     cfg: GeneratorConfig, rng: random.Random,
@@ -732,103 +754,101 @@ def gen_shipments(
     route_rows = routes.to_dict("records")
     rows = []
     total = cfg.counts["shipments"]
-    # Reserve ~10% of shipments for late departure so they are naturally
-    # in-transit during the final 7-day incremental window.
-    late_cutoff = int(total * 0.90)
+    late_cutoff = int(total * 0.92)
     late_window_start = cfg.timeline_end - timedelta(days=21)
     late_window_end = cfg.timeline_end - timedelta(days=5)
     for i in range(1, total + 1):
         route = rng.choice(route_rows)
-        if i > late_cutoff:
-            planned_dep = _rand_ts(rng, late_window_start, late_window_end)
-        else:
-            planned_dep = _rand_ts(rng, cfg.timeline_start, cfg.timeline_end - timedelta(days=30))
+        planned_dep = (_rand_ts(rng, late_window_start, late_window_end) if i > late_cutoff
+                       else _rand_ts(rng, cfg.timeline_start, cfg.timeline_end - timedelta(days=30)))
         transit_h = route["expected_transit_hours"]
         planned_del = min(planned_dep + timedelta(hours=transit_h), cfg.timeline_end)
-        # Late-window shipments are biased toward active statuses so they
-        # remain in-transit during the final incremental week.
+
         if i > late_cutoff:
-            status = rng.choice(["PICKED_UP", "IN_TRANSIT", "IN_TRANSIT", "DELAYED"])
+            status = rng.choices(["PICKED_UP", "IN_TRANSIT", "DELAYED"], weights=[0.15, 0.65, 0.20], k=1)[0]
         else:
-            status = rng.choice(SHIPMENT_STATUSES[:5])  # exclude CANCELLED most of the time
-        # determine shipment_type from route endpoints
+            status = rng.choices(["PLANNED", "PICKED_UP", "IN_TRANSIT", "DELAYED", "DELIVERED"],
+                                 weights=[0.08, 0.08, 0.10, 0.06, 0.68], k=1)[0]
+
         if route["origin_type"] == "SUPPLIER" and route["destination_type"] == "PLANT":
             stype = "INBOUND"
-        elif route["origin_type"] == "PLANT" and route["destination_type"] == "CUSTOMER":
-            stype = "OUTBOUND"
         else:
-            stype = rng.choice(SHIPMENT_TYPES)
+            stype = "OUTBOUND"
 
-        actual_dep = None
-        actual_del = None
+        actual_dep = None; actual_del = None
         if status in ("PICKED_UP", "IN_TRANSIT", "DELAYED", "DELIVERED"):
-            actual_dep = min(planned_dep + timedelta(hours=rng.uniform(-1, 4)), cfg.timeline_end)
+            # Mostly on-time departure with a minority of moderate delays.
+            dep_delta = rng.uniform(-3.0, 0.0) if rng.random() < 0.82 else rng.uniform(0.5, 10.0)
+            actual_dep = _clamp_ts(planned_dep + timedelta(hours=dep_delta), cfg)
         if status == "DELIVERED":
-            actual_del = min(planned_del + timedelta(hours=rng.uniform(-2, 24)), cfg.timeline_end)
-            if actual_dep and actual_del < actual_dep:
-                actual_del = min(actual_dep + timedelta(hours=transit_h), cfg.timeline_end)
+            # About 80% on-time/early, 20% naturally late.
+            del_delta = rng.uniform(-12.0, 0.0) if rng.random() < 0.80 else rng.uniform(1.0, 30.0)
+            actual_del = _clamp_ts(planned_del + timedelta(hours=del_delta), cfg)
+            if actual_dep is not None and actual_del < actual_dep:
+                actual_del = min(actual_dep + timedelta(hours=max(1, transit_h * 0.5)), cfg.timeline_end)
 
-        cost = round(route["distance_km"] * rng.uniform(0.5, 5.0) / 100, 2)
+        cost = round(route["distance_km"] * rng.uniform(0.8, 2.5) / 100, 2)
         rows.append({
-            "shipment_id": _id("SHP", i),
-            "shipment_type": stype,
-            "carrier_id": rng.choice(carrier_ids),
-            "route_id": route["route_id"],
+            "shipment_id": _id("SHP", i), "shipment_type": stype,
+            "carrier_id": rng.choice(carrier_ids), "route_id": route["route_id"],
             "shipment_status": status,
-            "planned_departure_at": planned_dep,
-            "actual_departure_at": actual_dep,
-            "planned_delivery_at": planned_del,
-            "actual_delivery_at": actual_del,
-            "shipping_cost": cost,
-            "last_updated_at": actual_del or actual_dep or planned_dep,
+            "planned_departure_at": planned_dep, "actual_departure_at": actual_dep,
+            "planned_delivery_at": planned_del, "actual_delivery_at": actual_del,
+            "shipping_cost": cost, "last_updated_at": actual_del or actual_dep or planned_dep,
         })
     return pd.DataFrame(rows)
-
 
 def gen_shipment_lines(
     cfg: GeneratorConfig, rng: random.Random,
     shipments: pd.DataFrame, order_lines: pd.DataFrame,
 ) -> pd.DataFrame:
-    ol_records = order_lines[["order_line_id", "part_id", "ordered_qty"]].to_dict("records")
-    max_sl = min(cfg.counts["shipment_lines_per_shipment_max"], len(ol_records))
-    n_shp = len(shipments)
-    shp_ids = shipments["shipment_id"].tolist()
-    shp_deps = shipments["planned_departure_at"].tolist()
+    """Allocate outbound shipment quantities in O(order_lines) time.
 
-    line_counts = [rng.randint(1, max_sl) for _ in range(n_shp)]
-    total_lines = sum(line_counts)
+    Each order line can be split across at most two outbound shipments and
+    cumulative shipped quantity never exceeds ordered quantity.
+    """
+    eligible = order_lines[order_lines["line_status"] != "CANCELLED"].copy()
+    outbound = shipments[shipments["shipment_type"] == "OUTBOUND"].copy()
+    if eligible.empty or outbound.empty:
+        return pd.DataFrame(columns=list(TABLE_SCHEMAS["shipment_lines"]["columns"].keys()))
 
-    sl_ids = [None] * total_lines
-    sl_shp_ids = [None] * total_lines
-    sl_ol_ids = [None] * total_lines
-    sl_part_ids = [None] * total_lines
-    sl_qtys = [0] * total_lines
-    sl_created = [None] * total_lines
+    max_sl = max(1, cfg.counts["shipment_lines_per_shipment_max"])
+    # Capacity slots keep shipment fan-out bounded without repeatedly scanning
+    # all order lines after most quantities have been fulfilled.
+    slots = []
+    for r in outbound.itertuples():
+        # Planned shipments often have no manifested lines yet.
+        cap = max_sl if r.shipment_status != "PLANNED" else max(1, max_sl // 2)
+        slots.extend([(r.shipment_id, r.planned_departure_at)] * cap)
+    rng.shuffle(slots)
 
-    seq = 0
-    for i in range(n_shp):
-        n = line_counts[i]
-        chosen = rng.sample(ol_records, n)
-        sid = shp_ids[i]
-        dep = shp_deps[i]
-        for ol in chosen:
-            sl_ids[seq] = _id("SL", seq + 1)
-            sl_shp_ids[seq] = sid
-            sl_ol_ids[seq] = ol["order_line_id"]
-            sl_part_ids[seq] = ol["part_id"]
-            sl_qtys[seq] = rng.randint(1, max(1, ol["ordered_qty"]))
-            sl_created[seq] = dep
+    rows = []; seq = 0; slot_idx = 0
+    records = list(eligible.itertuples())
+    rng.shuffle(records)
+    for ol in records:
+        if slot_idx >= len(slots): break
+        # Leave a realistic unfulfilled cohort.
+        if rng.random() < 0.12:
+            continue
+        ordered = int(ol.ordered_qty)
+        # 72% fully fulfilled; remainder partially fulfilled.
+        target = ordered if rng.random() < 0.72 else rng.randint(1, max(1, ordered - 1))
+        # Some fulfilled lines are split across two shipments.
+        n_parts = 2 if target >= 2 and rng.random() < 0.16 and slot_idx + 1 < len(slots) else 1
+        quantities = [target]
+        if n_parts == 2:
+            first = rng.randint(1, target - 1)
+            quantities = [first, target - first]
+        for qty in quantities:
+            if slot_idx >= len(slots): break
+            sid, dep = slots[slot_idx]; slot_idx += 1
             seq += 1
-
-    return pd.DataFrame({
-        "shipment_line_id": sl_ids[:seq],
-        "shipment_id": sl_shp_ids[:seq],
-        "order_line_id": sl_ol_ids[:seq],
-        "part_id": sl_part_ids[:seq],
-        "shipped_qty": sl_qtys[:seq],
-        "created_at": sl_created[:seq],
-    })
-
+            rows.append({
+                "shipment_line_id": _id("SL", seq), "shipment_id": sid,
+                "order_line_id": ol.order_line_id, "part_id": ol.part_id,
+                "shipped_qty": int(qty), "created_at": dep,
+            })
+    return pd.DataFrame(rows, columns=list(TABLE_SCHEMAS["shipment_lines"]["columns"].keys()))
 
 def gen_shipment_events(
     cfg: GeneratorConfig, rng: random.Random,
@@ -842,131 +862,78 @@ def gen_shipment_events(
         "DELIVERED": ["CREATED", "PICKED_UP", "DEPARTED", "ARRIVED_DESTINATION", "DELIVERED"],
         "CANCELLED": ["CREATED"],
     }
-    n_shp = len(shipments)
-    shp_ids = shipments["shipment_id"].tolist()
-    shp_statuses = shipments["shipment_status"].tolist()
-    shp_deps = shipments["planned_departure_at"].tolist()
-    shp_arrs = shipments["planned_delivery_at"].tolist()
-
-    CHUNK = 10000
-    chunk_dfs = []
-    seq = 0
-
-    for chunk_start in range(0, n_shp, CHUNK):
-        chunk_end = min(chunk_start + CHUNK, n_shp)
-        rows = []
-        for i in range(chunk_start, chunk_end):
-            events = status_to_events.get(shp_statuses[i], ["CREATED"])
-            dep = shp_deps[i]
-            arr = shp_arrs[i]
-            if pd.isna(arr) or arr <= dep:
-                arr = dep + timedelta(hours=24)
-            span = (arr - dep).total_seconds()
-            sid = shp_ids[i]
-            n_events = len(events)
-            for idx, evt in enumerate(events):
-                offset_frac = idx / max(n_events - 1, 1)
-                ts = dep + timedelta(seconds=span * offset_frac)
-                seq += 1
-                rows.append((
-                    _id("SE", seq), sid, ts, evt,
-                    round(rng.uniform(25, 55), 4),
-                    round(rng.uniform(-120, 30), 4),
-                    f"{evt} for {sid}",
-                ))
-        if rows:
-            chunk_dfs.append(pd.DataFrame(rows, columns=[
-                "shipment_event_id", "shipment_id", "event_timestamp",
-                "event_type", "location_latitude", "location_longitude",
-                "event_description",
-            ]))
-
-    if chunk_dfs:
-        return pd.concat(chunk_dfs, ignore_index=True)
-    return pd.DataFrame(columns=list(TABLE_SCHEMAS["shipment_events"]["columns"].keys()))
-    return pd.DataFrame(rows)
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 8. IoT Domain Generator
-# ═══════════════════════════════════════════════════════════════════════════
+    rows = []; seq = 0
+    for r in shipments.itertuples():
+        events = list(status_to_events.get(r.shipment_status, ["CREATED"]))
+        # Rare organic anomalies outside SC4.
+        if r.shipment_status in ("IN_TRANSIT", "DELAYED", "DELIVERED") and rng.random() < 0.008:
+            events.insert(max(1, len(events) - 1), "ROUTE_DEVIATION")
+        if r.shipment_status not in ("DELAYED", "CANCELLED") and rng.random() < 0.012:
+            events.insert(max(1, len(events) - 1), "DELAY_REPORTED")
+        dep = r.planned_departure_at
+        arr = r.actual_delivery_at if pd.notna(r.actual_delivery_at) else r.planned_delivery_at
+        if pd.isna(arr) or arr <= dep:
+            arr = min(dep + timedelta(hours=24), cfg.timeline_end)
+        span = max((arr - dep).total_seconds(), 1)
+        for idx, evt in enumerate(events):
+            frac = idx / max(len(events) - 1, 1)
+            seq += 1
+            rows.append({
+                "shipment_event_id": _id("SE", seq), "shipment_id": r.shipment_id,
+                "event_timestamp": _clamp_ts(dep + timedelta(seconds=span * frac), cfg),
+                "event_type": evt,
+                "location_latitude": round(rng.uniform(25, 55), 4),
+                "location_longitude": round(rng.uniform(-120, 30), 4),
+                "event_description": f"{evt} for {r.shipment_id}",
+            })
+    return pd.DataFrame(rows, columns=list(TABLE_SCHEMAS["shipment_events"]["columns"].keys()))
 
 def gen_vehicle_telemetry(
     cfg: GeneratorConfig, rng: random.Random,
     shipments: pd.DataFrame,
 ) -> pd.DataFrame:
-    import numpy as np
-
-    active = shipments[shipments["shipment_status"].isin(
-        ["PICKED_UP", "IN_TRANSIT", "DELAYED", "DELIVERED"]
-    )]
+    active = shipments[shipments["shipment_status"].isin(["PICKED_UP", "IN_TRANSIT", "DELAYED", "DELIVERED"])]
     pts_full = cfg.counts["telemetry_points_per_shipment"]
     pts_reduced = max(3, pts_full // 5)
     cutoff = cfg.timeline_end - timedelta(days=60)
-
-    n_active = len(active)
-    shp_ids = active["shipment_id"].tolist()
-    shp_statuses = active["shipment_status"].tolist()
-    act_deps = active["actual_departure_at"].tolist()
-    pln_deps = active["planned_departure_at"].tolist()
-    act_arrs = active["actual_delivery_at"].tolist()
-    pln_arrs = active["planned_delivery_at"].tolist()
-
-    # Process in chunks to limit peak memory
-    CHUNK = 5000
-    chunk_dfs = []
-    seq = 0
-
-    for chunk_start in range(0, n_active, CHUNK):
-        chunk_end = min(chunk_start + CHUNK, n_active)
-        rows = []
-        for i in range(chunk_start, chunk_end):
-            dep = act_deps[i] if pd.notna(act_deps[i]) else pln_deps[i]
-            arr = act_arrs[i] if pd.notna(act_arrs[i]) else pln_arrs[i]
-            if pd.isna(dep) or pd.isna(arr) or arr <= dep:
-                continue
-            sid = shp_ids[i]
-            status = shp_statuses[i]
-            is_old_delivered = (status == "DELIVERED" and arr < cutoff)
-            pts = pts_reduced if is_old_delivered else pts_full
-
-            vehicle_id = f"VEH-{abs(hash(sid)) % 100_000:05d}"
-            base_lat = rng.uniform(25.0, 55.0)
-            base_lon = rng.uniform(-120.0, 30.0)
-            interval_s = (arr - dep).total_seconds() / max(pts, 1)
-            cum_dist = 0.0
-            for p in range(pts):
-                ts = dep + timedelta(seconds=interval_s * p)
-                spd = round(max(0.0, rng.gauss(80, 20)), 1)
-                cum_dist += round(spd * (interval_s / 3600), 2)
-                if p == pts - 1 and status == "DELIVERED":
-                    vstatus = "ARRIVED"
-                elif spd < 5:
-                    vstatus = "IDLE"
-                else:
-                    vstatus = "MOVING"
-                seq += 1
-                rows.append((
-                    _id("TEL", seq), vehicle_id, sid, ts,
-                    round(base_lat + rng.uniform(-0.3, 0.3) * (p + 1), 6),
-                    round(base_lon + rng.uniform(-0.3, 0.3) * (p + 1), 6),
-                    spd, vstatus, round(cum_dist, 2),
-                ))
-        if rows:
-            chunk_dfs.append(pd.DataFrame(rows, columns=[
-                "telemetry_id", "vehicle_id", "shipment_id", "event_timestamp",
-                "latitude", "longitude", "speed_kmph", "vehicle_status",
-                "distance_travelled_km",
-            ]))
-
-    if chunk_dfs:
-        return pd.concat(chunk_dfs, ignore_index=True)
-    return pd.DataFrame(columns=list(TABLE_SCHEMAS["vehicle_telemetry"]["columns"].keys()))
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 9. Scenario Ground Truth (placeholder)
-# ═══════════════════════════════════════════════════════════════════════════
+    rows = []; seq = 0
+    for r in active.itertuples():
+        dep = r.actual_departure_at if pd.notna(r.actual_departure_at) else r.planned_departure_at
+        arr = r.actual_delivery_at if pd.notna(r.actual_delivery_at) else r.planned_delivery_at
+        if pd.isna(dep) or pd.isna(arr) or arr <= dep:
+            continue
+        is_old_delivered = r.shipment_status == "DELIVERED" and arr < cutoff
+        pts = pts_reduced if is_old_delivered else pts_full
+        vid = _stable_vehicle_id(r.shipment_id)
+        base_lat = rng.uniform(25.0, 55.0); base_lon = rng.uniform(-120.0, 30.0)
+        interval_s = (arr - dep).total_seconds() / max(pts, 1)
+        cum_dist = 0.0
+        organic_offroute = rng.random() < 0.006
+        off_idx = rng.randint(1, max(1, pts - 2)) if organic_offroute and pts > 2 else -1
+        for pidx in range(pts):
+            ts = dep + timedelta(seconds=interval_s * pidx)
+            spd = round(max(0.0, rng.gauss(72, 18)), 1)
+            cum_dist += round(spd * (interval_s / 3600), 2)
+            if pidx == pts - 1 and r.shipment_status == "DELIVERED":
+                vstatus = "ARRIVED"
+            elif pidx == off_idx:
+                vstatus = "OFF_ROUTE"
+            elif r.shipment_status == "DELAYED" and rng.random() < 0.08:
+                vstatus = "DELAYED"
+            elif spd < 5:
+                vstatus = "IDLE"
+            else:
+                vstatus = "MOVING"
+            seq += 1
+            rows.append({
+                "telemetry_id": _id("TEL", seq), "vehicle_id": vid, "shipment_id": r.shipment_id,
+                "event_timestamp": ts,
+                "latitude": round(base_lat + rng.uniform(-0.15, 0.15) * (pidx + 1), 6),
+                "longitude": round(base_lon + rng.uniform(-0.15, 0.15) * (pidx + 1), 6),
+                "speed_kmph": spd, "vehicle_status": vstatus,
+                "distance_travelled_km": round(cum_dist, 2),
+            })
+    return pd.DataFrame(rows, columns=list(TABLE_SCHEMAS["vehicle_telemetry"]["columns"].keys()))
 
 def gen_scenario_ground_truth(cfg: GeneratorConfig, rng: random.Random) -> pd.DataFrame:
     return pd.DataFrame(columns=list(TABLE_SCHEMAS["scenario_ground_truth"]["columns"].keys()))
@@ -1241,22 +1208,24 @@ def inject_inventory_shortage(
 
     for idx in inventory.index[mask_inv]:
         safety = inventory.at[idx, "safety_stock"]
-        # drain well below safety stock — some to zero
-        if rng.random() < 0.5:
-            new_on_hand = 0
+        # Mixed severity: out-of-stock, critical, and low positions.
+        roll = rng.random()
+        reorder = inventory.at[idx, "reorder_point"]
+        if roll < 0.30:
+            target_avail = 0
+        elif roll < 0.70:
+            target_avail = rng.randint(1, max(1, int(safety * 0.7)))
         else:
-            new_on_hand = rng.randint(0, max(1, int(safety * 0.3)))
+            target_avail = rng.randint(int(safety), max(int(safety), int(reorder) - 1))
+        existing_reserved = max(0, int(inventory.at[idx, "reserved_qty"]))
+        new_on_hand = target_avail + min(existing_reserved, max(0, target_avail // 2))
         reserved = min(inventory.at[idx, "reserved_qty"], new_on_hand)
         avail = new_on_hand - reserved
         inventory.at[idx, "on_hand_qty"] = new_on_hand
         inventory.at[idx, "reserved_qty"] = reserved
         inventory.at[idx, "available_qty"] = avail
-        if avail <= 0:
-            inventory.at[idx, "inventory_status"] = "OUT_OF_STOCK"
-        elif avail < safety:
-            inventory.at[idx, "inventory_status"] = "CRITICAL"
-        else:
-            inventory.at[idx, "inventory_status"] = "LOW"
+        reorder = inventory.at[idx, "reorder_point"]
+        inventory.at[idx, "inventory_status"] = _inventory_status(avail, safety, reorder)
 
     after_inv = inventory.loc[mask_inv, ["plant_id", "part_id", "on_hand_qty",
                                          "reserved_qty", "available_qty",
@@ -1457,6 +1426,17 @@ def inject_plant_bottleneck(
         mask_ord & orders["order_status"].isin(["CREATED", "CONFIRMED"]),
         "order_status"
     ] = "PROCESSING"
+
+    # Ensure the bottleneck creates observable backlog growth even when the
+    # baseline affected set already consists mostly of active/partial orders.
+    before_processing = int((before_orders["order_status"] == "PROCESSING").sum())
+    after_processing_now = int((orders.loc[mask_ord, "order_status"] == "PROCESSING").sum())
+    if after_processing_now <= before_processing:
+        candidates = orders.index[mask_ord & ~orders["order_status"].isin(["PROCESSING", "DELIVERED", "CANCELLED"])]
+        if len(candidates) == 0:
+            candidates = orders.index[mask_ord & (orders["order_status"] != "PROCESSING")]
+        if len(candidates) > 0:
+            orders.at[candidates[0], "order_status"] = "PROCESSING"
 
     # Push last_updated_at forward on ALL affected orders to show processing delay
     processing_delay = timedelta(days=rng.randint(5, 15))
@@ -1723,7 +1703,7 @@ def inject_logistics_disruption(
             dep = shp_row["actual_departure_at"] or shp_row["planned_departure_at"]
             if pd.isna(dep):
                 continue
-            vid = f"VEH-{abs(hash(sid)) % 100_000:05d}"
+            vid = _stable_vehicle_id(sid)
             base_lat = rng.uniform(25, 55)
             base_lon = rng.uniform(-120, 30)
             for p in range(1, 4):
@@ -1803,22 +1783,17 @@ def inject_customer_impact(
     #    Find orders that are stuck (PROCESSING) or whose outbound shipments
     #    are DELAYED — these are the customers experiencing downstream impact.
 
-    # orders still stuck in processing
-    stuck_order_ids = set(orders[orders["order_status"] == "PROCESSING"]["order_id"])
-
-    # orders linked to delayed outbound shipments
-    delayed_shp_ids = set(
-        shipments[shipments["shipment_status"] == "DELAYED"]["shipment_id"]
-    )
-    delayed_ol_ids = set(
-        shp_lines[shp_lines["shipment_id"].isin(delayed_shp_ids)]["order_line_id"]
-    )
-    delayed_order_ids = set(
-        order_lines[order_lines["order_line_id"].isin(delayed_ol_ids)]["order_id"]
-    )
-
-    # union of upstream-affected orders
-    all_affected_order_ids = sorted(stuck_order_ids | delayed_order_ids)
+    # Scenario 5 is the downstream culmination of explicit upstream scenarios,
+    # not a catch-all for every naturally PROCESSING/DELAYED record.
+    s1_orders = set(tables.get("_scenario_1_meta", {}).get("affected_order_ids", []))
+    s2_orders = set(tables.get("_scenario_2_meta", {}).get("affected_order_ids", []))
+    s3_orders = set(tables.get("_scenario_3_meta", {}).get("affected_order_ids", []))
+    s4_shipments = set(tables.get("_scenario_4_meta", {}).get("affected_shipment_ids", []))
+    s4_ol_ids = set(shp_lines[shp_lines["shipment_id"].isin(s4_shipments)]["order_line_id"])
+    s4_orders = set(order_lines[order_lines["order_line_id"].isin(s4_ol_ids)]["order_id"])
+    all_affected_order_ids = sorted(s1_orders | s2_orders | s3_orders | s4_orders)
+    delayed_shp_ids = set(s4_shipments)
+    stuck_order_ids = set(all_affected_order_ids)
     if not all_affected_order_ids:
         # no upstream damage observed — nothing to cascade
         return tables
@@ -2054,6 +2029,104 @@ def validate_business_rules(tables: Dict[str, pd.DataFrame]) -> List[str]:
     return errors
 
 
+
+
+def validate_data_quality(tables: Dict[str, pd.DataFrame]) -> List[str]:
+    errors: List[str] = []
+    orders = tables.get("orders", pd.DataFrame())
+    ol = tables.get("order_lines", pd.DataFrame())
+    sl = tables.get("shipment_lines", pd.DataFrame())
+    shipments = tables.get("shipments", pd.DataFrame())
+    inv = tables.get("inventory", pd.DataFrame())
+    sp = tables.get("supplier_parts", pd.DataFrame())
+    routes = tables.get("routes", pd.DataFrame())
+
+    if not ol.empty and not sl.empty:
+        shipped = sl.groupby("order_line_id")["shipped_qty"].sum()
+        ordered = ol.set_index("order_line_id")["ordered_qty"]
+        aligned = shipped.reindex(ordered.index, fill_value=0)
+        if int((aligned > ordered).sum()):
+            errors.append(f"order_lines: {(aligned > ordered).sum()} over-shipped lines")
+        cancelled = set(ol.loc[ol["line_status"] == "CANCELLED", "order_line_id"])
+        leaked = cancelled & set(sl["order_line_id"])
+        if leaked:
+            errors.append(f"order_lines: {len(leaked)} cancelled lines with shipment activity")
+
+    if not orders.empty and not ol.empty and not inv.empty:
+        demand = orders[["order_id", "plant_id"]].merge(ol[["order_id", "part_id", "line_status"]], on="order_id")
+        demand = demand[demand["line_status"] != "CANCELLED"]
+        demand_keys = set(demand[["plant_id", "part_id"]].itertuples(index=False, name=None))
+        inv_keys = set(inv[["plant_id", "part_id"]].itertuples(index=False, name=None))
+        missing = demand_keys - inv_keys
+        if missing:
+            errors.append(f"inventory: {len(missing)} demand plant+part combinations missing inventory")
+
+    if not sp.empty:
+        active = sp[sp["active_flag"] == True]
+        parts = set(tables.get("parts", pd.DataFrame()).get("part_id", []))
+        covered = set(active["part_id"])
+        if parts - covered:
+            errors.append(f"supplier_parts: {len(parts-covered)} parts with no active supplier")
+        pref = active.groupby("part_id")["preferred_supplier_flag"].sum()
+        bad_pref = int((pref != 1).sum())
+        if bad_pref:
+            errors.append(f"supplier_parts: {bad_pref} parts without exactly one preferred active supplier")
+
+    if not routes.empty:
+        cc = routes[(routes["origin_type"] == "CUSTOMER") & (routes["destination_type"] == "CUSTOMER")]
+        if len(cc):
+            errors.append(f"routes: {len(cc)} CUSTOMER->CUSTOMER routes")
+    if not shipments.empty and not routes.empty:
+        sr = shipments.merge(routes[["route_id", "origin_type", "destination_type"]], on="route_id", how="left")
+        bad_in = sr[(sr["origin_type"] == "SUPPLIER") & (sr["destination_type"] == "PLANT") & (sr["shipment_type"] != "INBOUND")]
+        bad_out = sr[(sr["origin_type"] == "PLANT") & (sr["destination_type"].isin(["CUSTOMER", "PLANT"])) & (sr["shipment_type"] != "OUTBOUND")]
+        if len(bad_in) + len(bad_out):
+            errors.append(f"shipments: {len(bad_in)+len(bad_out)} route/shipment_type mismatches")
+        delivered = shipments[shipments["shipment_status"] == "DELIVERED"]
+        if delivered["actual_delivery_at"].isna().any() or delivered["actual_departure_at"].isna().any():
+            errors.append("shipments: DELIVERED rows missing actual timestamps")
+        departed = shipments[shipments["shipment_status"].isin(["PICKED_UP", "IN_TRANSIT", "DELAYED", "DELIVERED"])]
+        if departed["actual_departure_at"].isna().any():
+            errors.append("shipments: active/departed rows missing actual_departure_at")
+    return errors
+
+
+def baseline_health_metrics(tables: Dict[str, pd.DataFrame]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    orders = tables["orders"]; ol = tables["order_lines"]; sl = tables["shipment_lines"]
+    shipments = tables["shipments"]; inv = tables["inventory"]; spf = tables["supplier_performance"]
+    events = tables["shipment_events"]; tel = tables["vehicle_telemetry"]
+    delivered = shipments[shipments["shipment_status"] == "DELIVERED"].copy()
+    if not delivered.empty:
+        out["delivered_on_time_pct"] = round(100 * (pd.to_datetime(delivered["actual_delivery_at"]) <= pd.to_datetime(delivered["planned_delivery_at"])).mean(), 1)
+    departed = shipments[shipments["actual_departure_at"].notna()].copy()
+    out["late_departure_pct"] = round(100 * (pd.to_datetime(departed["actual_departure_at"]) > pd.to_datetime(departed["planned_departure_at"])).mean(), 1) if len(departed) else 0.0
+    shipped = sl.groupby("order_line_id")["shipped_qty"].sum() if not sl.empty else pd.Series(dtype=float)
+    ordered = ol.set_index("order_line_id")["ordered_qty"]
+    out["overshipped_order_lines"] = int((shipped.reindex(ordered.index, fill_value=0) > ordered).sum())
+    cancelled = set(ol.loc[ol["line_status"] == "CANCELLED", "order_line_id"])
+    out["cancelled_lines_with_shipments"] = len(cancelled & set(sl["order_line_id"]))
+    order_cancel_counts = ol.groupby("order_id")["line_status"].agg(lambda x: (x == "CANCELLED").sum())
+    order_line_counts = ol.groupby("order_id").size()
+    out["partial_cancel_orders"] = int(((order_cancel_counts > 0) & (order_cancel_counts < order_line_counts)).sum())
+    demand = orders[["order_id", "plant_id"]].merge(ol[ol["line_status"] != "CANCELLED"][["order_id", "part_id"]], on="order_id")
+    demand_keys = set(demand[["plant_id", "part_id"]].itertuples(index=False, name=None))
+    inv_keys = set(inv[["plant_id", "part_id"]].itertuples(index=False, name=None))
+    out["demand_plant_part_combinations"] = len(demand_keys); out["demand_missing_inventory"] = len(demand_keys - inv_keys)
+    active_sp = tables["supplier_parts"][tables["supplier_parts"]["active_flag"] == True]
+    parts = set(tables["parts"]["part_id"]); out["parts_no_active_supplier"] = len(parts - set(active_sp["part_id"]))
+    pref = active_sp.groupby("part_id")["preferred_supplier_flag"].sum(); out["parts_bad_preferred_supplier_count"] = int((pref != 1).sum())
+    out["shipment_status_distribution"] = shipments["shipment_status"].value_counts().to_dict()
+    out["inventory_status_distribution"] = inv["inventory_status"].value_counts().to_dict()
+    recent = spf.sort_values("measurement_date").groupby("supplier_id").tail(1)
+    healthy = (recent["on_time_delivery_pct"] >= 0.90) & (recent["fill_rate_pct"] >= 0.90) & (recent["risk_score"] < 0.30)
+    weak = (recent["on_time_delivery_pct"] < 0.82) | (recent["fill_rate_pct"] < 0.84) | (recent["risk_score"] >= 0.45)
+    out["supplier_health_distribution"] = {"HEALTHY": int(healthy.sum()), "WEAK": int(weak.sum()), "MODERATE": int(len(recent) - healthy.sum() - weak.sum())}
+    sc4_ids = set(tables.get("_scenario_4_meta", {}).get("affected_shipment_ids", []))
+    out["organic_route_deviation_events"] = int(((events["event_type"] == "ROUTE_DEVIATION") & ~events["shipment_id"].isin(sc4_ids)).sum())
+    out["organic_off_route_telemetry"] = int(((tel["vehicle_status"] == "OFF_ROUTE") & ~tel["shipment_id"].isin(sc4_ids)).sum())
+    return out
+
 def validate_all(tables: Dict[str, pd.DataFrame], cfg: GeneratorConfig) -> Dict[str, List[str]]:
     # filter out internal metadata keys (start with _) for standard validation
     real_tables = {k: v for k, v in tables.items() if not k.startswith("_") and isinstance(v, pd.DataFrame)}
@@ -2062,6 +2135,7 @@ def validate_all(tables: Dict[str, pd.DataFrame], cfg: GeneratorConfig) -> Dict[
         "foreign_keys": validate_foreign_keys(real_tables),
         "timestamps": validate_timestamps(real_tables, cfg),
         "business_rules": validate_business_rules(real_tables),
+        "data_quality": validate_data_quality(real_tables),
     }
 
 
@@ -2509,14 +2583,18 @@ def validate_scenario_logistics_disruption(tables: Dict[str, pd.DataFrame]) -> L
     all_delayed = all(s == "DELAYED" for s in after_shp["shipment_status"])
 
     # ── delivery delays ──
+    # Compare delay relative to each shipment's own plan, not absolute delivery
+    # timestamps across different shipments. Missing pre-injection actual delivery
+    # means the shipment had not completed yet, so use zero observed delay baseline.
     delivery_delayed = False
     if not after_shp.empty and not before_shp.empty:
-        before_del = pd.to_datetime(before_shp["actual_delivery_at"].dropna())
-        after_del = pd.to_datetime(after_shp["actual_delivery_at"].dropna())
-        if not after_del.empty and not before_del.empty:
-            delivery_delayed = after_del.mean() > before_del.mean()
-        elif not after_del.empty:
-            delivery_delayed = True
+        b_actual = pd.to_datetime(before_shp["actual_delivery_at"], errors="coerce")
+        b_plan = pd.to_datetime(before_shp["planned_delivery_at"], errors="coerce")
+        a_actual = pd.to_datetime(after_shp["actual_delivery_at"], errors="coerce")
+        a_plan = pd.to_datetime(after_shp["planned_delivery_at"], errors="coerce")
+        before_delay = ((b_actual - b_plan).dt.total_seconds() / 3600).fillna(0)
+        after_delay = ((a_actual - a_plan).dt.total_seconds() / 3600).fillna(0)
+        delivery_delayed = after_delay.mean() > before_delay.mean()
 
     # ── route deviation events ──
     shp_events = tables["shipment_events"]
@@ -2673,132 +2751,75 @@ def generate_all(cfg: Optional[GeneratorConfig] = None) -> Tuple[Dict[str, pd.Da
         cfg = GeneratorConfig()
     rng = random.Random(cfg.seed)
 
-    # ── dimension / reference tables (no FK deps) ──
     customers = gen_customers(cfg, rng)
     plants = gen_plants(cfg, rng)
     suppliers = gen_suppliers(cfg, rng)
-    parts = gen_parts(cfg, rng)                       # Supplier domain, needed by ERP + Logistics
+    parts = gen_parts(cfg, rng)
     carriers = gen_carriers(cfg, rng)
-
-    # ── relationship tables (depend on dimensions) ──
     supplier_parts = gen_supplier_parts(cfg, rng, suppliers, parts)
     supplier_performance = gen_supplier_performance(cfg, rng, suppliers)
     routes = gen_routes(cfg, rng, plants, suppliers, customers)
 
-    # ── transactional tables (depend on dimensions + parts) ──
+    # Inventory must exist before demand so order lines can be plant-aware.
+    inventory = gen_inventory(cfg, rng, plants, parts)
     orders = gen_orders(cfg, rng, customers, plants)
-    order_lines = gen_order_lines(cfg, rng, orders, parts)
+    order_lines = gen_order_lines(cfg, rng, orders, parts, inventory)
 
-    # backfill orders.order_total from order_lines
     totals = order_lines.groupby("order_id")["line_amount"].sum().reset_index()
     totals.columns = ["order_id", "order_total"]
     orders = orders.drop(columns=["order_total"]).merge(totals, on="order_id", how="left")
     orders["order_total"] = orders["order_total"].fillna(0).round(2)
-    del totals
 
-    inventory = gen_inventory(cfg, rng, plants, parts)
-
-    # ── logistics transactional (depend on carriers, routes, order_lines) ──
     shipments = gen_shipments(cfg, rng, carriers, routes)
     shipment_lines = gen_shipment_lines(cfg, rng, shipments, order_lines)
-    shipment_events = gen_shipment_events(cfg, rng, shipments)
 
-    # ── IoT (depends on shipments) ──
+    # Derive line fulfillment state from actual allocated quantities.
+    shipped_qty = shipment_lines.groupby("order_line_id")["shipped_qty"].sum() if not shipment_lines.empty else pd.Series(dtype=float)
+    shp_status = shipment_lines.merge(shipments[["shipment_id", "shipment_status"]], on="shipment_id", how="left") if not shipment_lines.empty else pd.DataFrame()
+    delivered_lines = set(shp_status.loc[shp_status["shipment_status"] == "DELIVERED", "order_line_id"]) if not shp_status.empty else set()
+    for idx, r in order_lines.iterrows():
+        if r["line_status"] == "CANCELLED":
+            continue
+        sq = int(shipped_qty.get(r["order_line_id"], 0))
+        oq = int(r["ordered_qty"])
+        if sq <= 0:
+            status = "PROCESSING" if rng.random() < 0.55 else "CONFIRMED"
+        elif sq < oq:
+            status = "PARTIALLY_SHIPPED"
+        elif r["order_line_id"] in delivered_lines:
+            status = "DELIVERED"
+        else:
+            status = "SHIPPED"
+        order_lines.at[idx, "line_status"] = status
+
+    # Derive order status from its lines.
+    for oid, grp in order_lines.groupby("order_id"):
+        statuses = grp["line_status"].tolist()
+        if all(x == "CANCELLED" for x in statuses): status = "CANCELLED"
+        elif any(x == "PARTIALLY_SHIPPED" for x in statuses) or (any(x == "CANCELLED" for x in statuses) and any(x in ("SHIPPED", "DELIVERED") for x in statuses)): status = "PARTIALLY_SHIPPED"
+        elif all(x in ("DELIVERED", "CANCELLED") for x in statuses): status = "DELIVERED"
+        elif all(x in ("SHIPPED", "DELIVERED", "CANCELLED") for x in statuses): status = "SHIPPED"
+        elif any(x in ("PROCESSING", "SHIPPED", "DELIVERED") for x in statuses): status = "PROCESSING"
+        else: status = "CONFIRMED"
+        orders.loc[orders["order_id"] == oid, "order_status"] = status
+
+    shipment_events = gen_shipment_events(cfg, rng, shipments)
     import gc; gc.collect()
     telemetry = gen_vehicle_telemetry(cfg, rng, shipments)
-
-    # ── validation ground truth (placeholder) ──
     scenario_gt = gen_scenario_ground_truth(cfg, rng)
 
     tables: Dict[str, pd.DataFrame] = {
-        "customers": customers,
-        "plants": plants,
-        "suppliers": suppliers,
-        "parts": parts,
-        "carriers": carriers,
-        "supplier_parts": supplier_parts,
-        "supplier_performance": supplier_performance,
-        "routes": routes,
-        "orders": orders,
-        "order_lines": order_lines,
-        "inventory": inventory,
-        "shipments": shipments,
-        "shipment_lines": shipment_lines,
-        "shipment_events": shipment_events,
-        "vehicle_telemetry": telemetry,
-        "scenario_ground_truth": scenario_gt,
+        "customers": customers, "plants": plants, "suppliers": suppliers, "parts": parts,
+        "carriers": carriers, "supplier_parts": supplier_parts, "supplier_performance": supplier_performance,
+        "routes": routes, "orders": orders, "order_lines": order_lines, "inventory": inventory,
+        "shipments": shipments, "shipment_lines": shipment_lines, "shipment_events": shipment_events,
+        "vehicle_telemetry": telemetry, "scenario_ground_truth": scenario_gt,
     }
-
-    # scenario injection (all no-ops for now)
-    for injector in SCENARIO_INJECTORS.values():
-        tables = injector(cfg, rng, tables)
-
+    for i, injector in enumerate(SCENARIO_INJECTORS.values(), start=1):
+        # Isolate scenario randomness so results are deterministic even if base
+        # generation implementation changes its random call count.
+        scenario_rng = random.Random(cfg.seed + 2000 + i)
+        tables = injector(cfg, scenario_rng, tables)
     validation = validate_all(tables, cfg)
     return tables, validation
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 13. CLI entry point
-# ═══════════════════════════════════════════════════════════════════════════
-
-if __name__ == "__main__":
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Supply-chain synthetic data generator")
-    parser.add_argument("--preset", choices=list(ROW_COUNT_PRESETS.keys()), default="tiny")
-    parser.add_argument("--seed", type=int, default=42)
-    args = parser.parse_args()
-
-    cfg = GeneratorConfig(seed=args.seed, preset=args.preset)
-    tables, validation = generate_all(cfg)
-
-    print("\n=== Row Counts ===")
-    for name, df in tables.items():
-        if name.startswith("_"):
-            continue
-        print(f"  {name:30s} {len(df):>10,}")
-
-    print("\n=== Validation Results ===")
-    total_errors = 0
-    for category, errs in validation.items():
-        status = "PASS" if not errs else "FAIL"
-        print(f"\n  [{category}] {status}")
-        for e in errs:
-            print(f"    - {e}")
-            total_errors += 1
-
-    if total_errors == 0:
-        print("\n  All validations passed.")
-    else:
-        print(f"\n  {total_errors} issue(s) found.")
-
-    # Scenario-specific validation
-    if "_scenario_1_meta" in tables:
-        print("\n=== Scenario 1: Supplier Deterioration ===")
-        scenario_report = validate_scenario_supplier_deterioration(tables)
-        for line in scenario_report:
-            print(f"  {line}")
-
-    if "_scenario_2_meta" in tables:
-        print("\n=== Scenario 2: Inventory Shortage ===")
-        scenario_report = validate_scenario_inventory_shortage(tables)
-        for line in scenario_report:
-            print(f"  {line}")
-
-    if "_scenario_3_meta" in tables:
-        print("\n=== Scenario 3: Plant Bottleneck ===")
-        scenario_report = validate_scenario_plant_bottleneck(tables)
-        for line in scenario_report:
-            print(f"  {line}")
-
-    if "_scenario_4_meta" in tables:
-        print("\n=== Scenario 4: Logistics / Landed-Cost Disruption ===")
-        scenario_report = validate_scenario_logistics_disruption(tables)
-        for line in scenario_report:
-            print(f"  {line}")
-
-    if "_scenario_5_meta" in tables:
-        print("\n=== Scenario 5: Customer Impact ===")
-        scenario_report = validate_scenario_customer_impact(tables)
-        for line in scenario_report:
-            print(f"  {line}")

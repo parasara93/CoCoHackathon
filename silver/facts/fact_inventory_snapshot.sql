@@ -1,7 +1,7 @@
 -- =============================================================================
 -- FACT_INVENTORY_SNAPSHOT
 -- Target: SUPPLY_CHAIN_DW.SILVER.FACT_INVENTORY_SNAPSHOT
--- Source: SUPPLY_CHAIN_RAW_DATASET.RAW.INVENTORY
+-- Source: SUPPLY_CHAIN_DW.RAW.INVENTORY
 -- Grain:  One row per plant + part (PLANT_ID, PART_ID)
 -- Dedup:  INVENTORY by (PLANT_ID, PART_ID) using LAST_UPDATED_AT DESC
 -- Derived:
@@ -17,7 +17,7 @@ WITH inventory_dedup AS (
   FROM (
     SELECT *,
       ROW_NUMBER() OVER (PARTITION BY PLANT_ID, PART_ID ORDER BY LAST_UPDATED_AT DESC) AS rn
-    FROM SUPPLY_CHAIN_RAW_DATASET.RAW.INVENTORY
+    FROM SUPPLY_CHAIN_DW.RAW.INVENTORY
   )
   WHERE rn = 1
 )

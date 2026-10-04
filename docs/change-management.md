@@ -57,27 +57,34 @@ Use only for objects that are intentionally replaced on every change:
 
 `migrations/TEMPLATE__migration.sql` is a documentation-only template. Its filename does not match any schemachange execution pattern (V/R/A) so it is never executed.
 
-## Baseline strategy
+## Migration chain history
 
-The validated Silver layer (`SUPPLY_CHAIN_DW.SILVER`, 15 objects) was created before schemachange was adopted. The recovered DDL is preserved in:
+### Original partial chain (archived)
 
-- `silver/dimensions/*.sql`, `silver/facts/*.sql`, `silver/bridges/*.sql` — source of truth for what was built
-- `migrations/V1.0.0__baseline_silver_layer.sql` — no-op marker executed by schemachange
+The original migration chain (V1.0.0–V2.7.0, plus V3.0.0) was written for a Snowflake account where Silver tables already existed before schemachange was adopted. That chain is **not a valid deploy-from-zero sequence** because:
 
-### How the baseline works
+- V1.0.0 was a no-op marker that assumed Silver already existed.
+- V2.1.0+ Gold mart migrations referenced Silver tables via `SELECT ... FROM SUPPLY_CHAIN_DW.SILVER.*`.
+- V3.0.0 contained an environment-specific AWS storage integration.
 
-`V1.0.0__baseline_silver_layer.sql` contains no destructive DDL — only a `SELECT 1` no-op and documentation comments. When schemachange executes this file during the first deploy, it automatically records version `1.0.0` in the `CHANGE_HISTORY` table. No manual seeding of migration history is needed.
+These files are preserved in `migrations_original/` for reference. They must not be placed back into `migrations/` without adaptation.
 
-All future migrations start at `V1.1.0` or higher.
+### Current canonical chain (fresh-account rebuild)
 
-### Version numbering going forward
+The active `migrations/` directory contains the canonical fresh-account deployment path. Every migration creates its objects from scratch in dependency order — no migration references objects that have not been created by an earlier migration.
+
+### Version numbering
 
 | Range | Purpose |
 |---|---|
-| V1.0.0 | Silver baseline (no-op, auto-recorded by schemachange) |
-| V1.1.0+ | Silver-layer additions/modifications |
-| V2.0.0+ | Gold-layer creation and changes |
-| V3.0.0+ | Reserved for future layers or major refactors |
+| V1.0.0 | RAW schema and tables |
+| V1.1.0+ | RAW-layer infrastructure (file formats, stages) |
+| V2.0.0+ | Silver schema and tables |
+| V3.0.0+ | Gold schema, marts, validation objects |
+
+### Environment-specific objects
+
+The AWS S3 storage integration (`SUPPLY_CHAIN_S3_INTEGRATION`) depends on an environment-specific IAM role ARN and requires a manual AWS trust-policy handshake. It is treated as environment/bootstrap configuration rather than portable project migration DDL. It must be created outside the versioned migration chain before V1.1.0 (stage creation) can run.
 
 ## Initialization
 
@@ -133,9 +140,18 @@ schemachange deploy --config-folder .
 ```
 
 On first run this will:
-1. Create `SUPPLY_CHAIN_DW.SCHEMACHANGE` schema and `CHANGE_HISTORY` table automatically
-2. Execute `V1.0.0` (no-op baseline marker) and record it in `CHANGE_HISTORY`
+1. Create the `CHANGE_HISTORY` table automatically (the `SUPPLY_CHAIN_DW` database and `SCHEMACHANGE` schema must already exist — see bootstrap prerequisites below)
+2. Execute `V1.0.0` (create RAW schema and tables) and record it in `CHANGE_HISTORY`
 3. Apply any subsequent versioned/repeatable migrations
+
+### Bootstrap prerequisites
+
+Schemachange 4.3.3 requires the target database and schema to exist before it can connect. These must be created manually before the first deploy:
+
+```sql
+CREATE DATABASE IF NOT EXISTS SUPPLY_CHAIN_DW;
+CREATE SCHEMA IF NOT EXISTS SUPPLY_CHAIN_DW.SCHEMACHANGE;
+```
 
 ### 6. Verify CHANGE_HISTORY
 
@@ -145,7 +161,7 @@ FROM SUPPLY_CHAIN_DW.SCHEMACHANGE.CHANGE_HISTORY
 ORDER BY INSTALLED_ON;
 ```
 
-Confirm that `V1.0.0__baseline_silver_layer.sql` appears with status `Success`.
+Confirm that `V1.0.0__create_raw_schema_and_tables.sql` appears with status `Success`.
 
 ## Validation
 
@@ -165,8 +181,9 @@ After any Silver-layer migration, run the validation suite:
 | File | Purpose |
 |---|---|
 | `schemachange-config.yml` | schemachange configuration (config v2) |
-| `migrations/V1.0.0__baseline_silver_layer.sql` | No-op baseline marker for Silver layer |
+| `migrations/V1.0.0__create_raw_schema_and_tables.sql` | Create RAW schema and 15 operational tables |
 | `migrations/TEMPLATE__migration.sql` | Template for new migrations (not executable) |
+| `migrations_original/` | Archived original migration chain (reference only) |
 | `silver/**/*.sql` | Recovered Silver DDL (source of truth for what was built) |
 | `validations/silver/*.sql` | Post-change validation queries |
 | `docs/change-management.md` | This document |

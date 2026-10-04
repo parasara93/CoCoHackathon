@@ -1,7 +1,7 @@
 -- =============================================================================
 -- DIM_PART
 -- Target: SUPPLY_CHAIN_DW.SILVER.DIM_PART
--- Source: SUPPLY_CHAIN_RAW_DATASET.RAW.PARTS
+-- Source: SUPPLY_CHAIN_DW.RAW.PARTS
 -- Grain:  One row per part (PART_ID)
 -- Dedup:  N/A — PARTS is a static reference table
 -- Recovered: Exact CTAS from query history (2026-09-29 23:39:23)
@@ -16,4 +16,4 @@ SELECT
   STANDARD_COST,
   CRITICALITY,
   CREATED_AT
-FROM SUPPLY_CHAIN_RAW_DATASET.RAW.PARTS;
+FROM SUPPLY_CHAIN_DW.RAW.PARTS;

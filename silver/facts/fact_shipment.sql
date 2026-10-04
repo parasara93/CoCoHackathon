@@ -1,7 +1,7 @@
 -- =============================================================================
 -- FACT_SHIPMENT
 -- Target: SUPPLY_CHAIN_DW.SILVER.FACT_SHIPMENT
--- Source: SUPPLY_CHAIN_RAW_DATASET.RAW.SHIPMENTS
+-- Source: SUPPLY_CHAIN_DW.RAW.SHIPMENTS
 -- Grain:  One row per shipment (SHIPMENT_ID)
 -- Dedup:  SHIPMENTS by SHIPMENT_ID using LAST_UPDATED_AT DESC
 -- Derived:
@@ -19,7 +19,7 @@ WITH shipments_dedup AS (
   FROM (
     SELECT *,
       ROW_NUMBER() OVER (PARTITION BY SHIPMENT_ID ORDER BY LAST_UPDATED_AT DESC) AS rn
-    FROM SUPPLY_CHAIN_RAW_DATASET.RAW.SHIPMENTS
+    FROM SUPPLY_CHAIN_DW.RAW.SHIPMENTS
   )
   WHERE rn = 1
 )

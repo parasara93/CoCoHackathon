@@ -70,6 +70,24 @@ Scenario IDs from `scenario_ground_truth` may appear in validation/reference que
 
 - Never hardcode synthetic scenario IDs, scenario names, expected target entities, or expected outcomes into transformation logic. Scenario-specific IDs and expected results may only be used in validation/reference queries to confirm that the generated scenarios remain detectable after transformation.
 
+## Historical Replay, CDC, and Data-Loading Operations
+
+The following rules govern batch loading, historical replay, CDC (change data capture), MERGE/upsert execution, reconciliation, and audit work — collectively referred to as **DML/orchestration work**. This work is distinct from schema-change work.
+
+1. **Reuse existing objects.** Reuse existing RAW tables, Silver tables, migrations, transformations, and validations wherever possible. Do not recreate RAW or Silver objects unless explicitly required by a new business requirement.
+
+2. **DML/orchestration is not schema-change work.** COPY INTO, batch loading, historical replay, MERGE, reconciliation, validation execution, and audit logging are DML/orchestration activities. They do not require schemachange migrations or the `schema-change` skill unless Snowflake object definitions (CREATE, ALTER, DROP) are also involved.
+
+3. **Invoke `schema-change` only for DDL.** If a CDC or replay task requires creating or altering tables, streams, tasks, procedures, stages, file formats, or control/audit objects, use the `schema-change` skill for those DDL changes only. The data-loading and MERGE execution that follows is DML/orchestration, not schema-change work.
+
+4. **Preserve Silver grain and deduplication logic.** Existing Silver grain definitions and previously approved deduplication logic (see Deduplication Rules above) must not be altered by data-loading or replay work. New data must flow through the same deduplication and transformation rules.
+
+5. **Use ingestion metadata for batch identification.** For incremental processing, identify the processing batch using ingestion metadata such as `LOAD_BATCH_ID`. Do not use business timestamps as the primary ingestion cursor.
+
+6. **Business timestamps for version resolution only.** Business timestamps such as `LAST_UPDATED_AT` may still be used to determine which version of a business record should win during an upsert, consistent with the existing deduplication rules.
+
+7. **Validate after data changes.** Existing validation rules (`validations/silver/` and `validations/gold/`) must continue to run after changes affecting RAW → Silver processing. The same validation suite that covers schema changes also covers data-loading correctness.
+
 ## Change Management (schemachange)
 
 All persistent Snowflake schema changes are managed through version-controlled migration files under `migrations/` using [schemachange](https://github.com/Snowflake-Labs/schemachange). See `docs/change-management.md` for full details.
