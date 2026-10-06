@@ -88,17 +88,17 @@ EXPERTS: Dict[str, Dict[str, Any]] = {
         ],
     },
     "Overall Resilience Expert": {
-        "agent": "SUPPLY_CHAIN_DW.GOLD.RESILIENCE_ORCHESTRATOR",
-        "description": "Cross-domain resilience analysis and governed operational actions.",
+        "agent": "SUPPLY_CHAIN_DW.GOLD.RESILIENCE_INSIGHTS_AGENT",
+        "description": "Cross-domain resilience analysis across all five supply-chain risk domains.",
         "capability_hint": (
-            "Can analyze cross-domain risks, create governed Snowflake risk cases, "
-            "and raise GitHub issues for operational tracking when you explicitly ask."
+            "Analyzes cross-domain risks using all specialist agents. "
+            "Read-only — risk cases and GitHub issues are created through the Action Agent in Snowsight."
         ),
         "suggestions": [
             "Give me a resilience dashboard summary of the highest-priority risks.",
             "Trace the major risks across supplier, inventory, fulfillment, logistics, and customer impact.",
-            "Create a risk case for the highest-priority issue after validating the evidence.",
-            "Create a risk case and raise a GitHub issue for the highest-priority disruption.",
+            "Which suppliers have the most downstream exposure to late orders?",
+            "Compare inventory pressure vs fulfillment backlog by plant.",
             "What are the top three risks that need operational attention right now?",
         ],
     },
@@ -281,8 +281,8 @@ def _render_expert_selector() -> str:
 
     if expert == "Overall Resilience Expert":
         st.info(
-            "Operational actions are governed: the agent creates a Snowflake risk case first. "
-            "If you explicitly ask for GitHub tracking, it can then use the configured GitHub MCP integration."
+            "This agent provides read-only cross-domain analysis. "
+            "To create risk cases or GitHub issues, use the Resilience Action Agent in Snowsight."
         )
 
     return expert
