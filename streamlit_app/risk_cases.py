@@ -163,8 +163,6 @@ def render_risk_cases() -> None:
 
     st.dataframe(
         filtered[display_cols],
-        width="stretch",
-        hide_index=True,
     )
 
     st.caption(f"{len(filtered)} case(s) shown")

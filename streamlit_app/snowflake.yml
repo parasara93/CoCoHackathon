@@ -1,0 +1,17 @@
+definition_version: 2
+entities:
+  supply_chain_control_tower:
+    type: streamlit
+    identifier:
+      name: SUPPLY_CHAIN_CONTROL_TOWER
+      database: SUPPLY_CHAIN_DW
+      schema: GOLD
+    query_warehouse: COMPUTE_WH
+    runtime_name: SYSTEM$ST_CONTAINER_RUNTIME_PY3_11
+    compute_pool: SYSTEM_COMPUTE_POOL_CPU
+    main_file: app.py
+    artifacts:
+      - app.py
+      - agent_client.py
+      - chart_queries.py
+      - risk_cases.py

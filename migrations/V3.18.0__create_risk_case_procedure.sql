@@ -104,20 +104,19 @@ BEGIN
         CREATED_AT,
         UPDATED_AT
     )
-    VALUES (
+    SELECT
         :V_CASE_ID,
-        UPPER(TRIM(P_ENTITY_TYPE)),
-        TRIM(P_ENTITY_ID),
-        UPPER(TRIM(P_RISK_TYPE)),
+        UPPER(TRIM(:P_ENTITY_TYPE)),
+        TRIM(:P_ENTITY_ID),
+        UPPER(TRIM(:P_RISK_TYPE)),
         :V_SEVERITY,
-        TRIM(P_SUMMARY),
-        NULLIF(TRIM(P_RECOMMENDED_ACTION), ''),
+        TRIM(:P_SUMMARY),
+        NULLIF(TRIM(:P_RECOMMENDED_ACTION), ''),
         'OPEN',
-        NULLIF(TRIM(P_SOURCE_AGENT), ''),
+        NULLIF(TRIM(:P_SOURCE_AGENT), ''),
         CURRENT_USER(),
         CURRENT_TIMESTAMP(),
-        CURRENT_TIMESTAMP()
-    );
+        CURRENT_TIMESTAMP();
 
 
     RETURN OBJECT_CONSTRUCT(

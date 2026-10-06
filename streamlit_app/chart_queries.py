@@ -286,6 +286,10 @@ EXPERT_CHART_MAP = {
         "plant_backlog",
         "inventory_pressure_vs_backlog",
     ],
+    "Plant Fulfillment Expert": [
+        "plant_backlog",
+        "inventory_pressure_vs_backlog",
+    ],
     "Customer Impact Expert": [
         "customer_outstanding_ranking",
         "customer_fulfillment_distribution",
@@ -308,7 +312,8 @@ def detect_chart_intent(question: str, expert: str) -> str | None:
     if not (is_chart or is_rank or is_compare):
         return None
 
-    candidates = EXPERT_CHART_MAP.get(expert, [])
+    # Also try Plant Fulfillment Expert (app.py uses this name).
+    candidates = EXPERT_CHART_MAP.get(expert, EXPERT_CHART_MAP.get("Inventory & Plant Expert", []) if "Plant" in expert else [])
     keywords_map = {
         "supplier_risk_score_ranking": ["risk score", "ranking supplier", "rank supplier"],
         "supplier_otd_vs_fill": ["otd", "fill rate", "compare supplier"],
@@ -334,3 +339,69 @@ def detect_chart_intent(question: str, expert: str) -> str | None:
                 return key
 
     return candidates[0] if candidates else None
+
+
+def render_chart_for_question(expert_name: str, question: str):
+    """Render a chart if the question looks like a chart request. Returns None otherwise."""
+    import altair as alt
+    import pandas as pd
+    import streamlit as st
+
+    chart_key = detect_chart_intent(question, expert_name)
+    if chart_key is None:
+        return None
+
+    spec = CHART_QUERIES.get(chart_key)
+    if spec is None:
+        return None
+
+    try:
+        import agent_client
+        rows = agent_client.run_sql(spec["sql"])
+    except Exception:
+        return None
+
+    if not rows:
+        return None
+
+    df = pd.DataFrame(rows)
+    df.columns = [c.upper() for c in df.columns]
+
+    chart_type = spec.get("chart_type", "bar")
+    x_col = spec["x"]
+    y_col = spec["y"]
+    color_col = spec.get("color")
+    tooltip_col = spec.get("tooltip")
+
+    tooltips = [x_col, y_col]
+    if color_col and color_col in df.columns:
+        tooltips.append(color_col)
+    if tooltip_col and tooltip_col in df.columns:
+        tooltips.append(tooltip_col)
+
+    st.subheader(spec.get("title", chart_key))
+
+    if chart_type == "horizontal_bar":
+        chart = alt.Chart(df).mark_bar().encode(
+            x=alt.X(x_col, type="quantitative"),
+            y=alt.Y(y_col, type="nominal", sort="-x"),
+            tooltip=tooltips,
+            **({"color": color_col} if color_col and color_col in df.columns else {}),
+        ).properties(height=max(len(df) * 22, 200))
+    elif chart_type == "scatter":
+        chart = alt.Chart(df).mark_circle(size=60).encode(
+            x=alt.X(x_col, type="quantitative"),
+            y=alt.Y(y_col, type="quantitative"),
+            tooltip=tooltips,
+            **({"color": color_col} if color_col and color_col in df.columns else {}),
+        )
+    else:
+        chart = alt.Chart(df).mark_bar().encode(
+            x=alt.X(x_col, type="nominal"),
+            y=alt.Y(y_col, type="quantitative"),
+            tooltip=tooltips,
+            **({"color": color_col} if color_col and color_col in df.columns else {}),
+        )
+
+    st.altair_chart(chart)
+    return True

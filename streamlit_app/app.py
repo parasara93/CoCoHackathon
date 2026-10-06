@@ -105,8 +105,14 @@ EXPERTS: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _safe_rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
+
 def _resolve_agent_callable() -> Callable[..., Any]:
-    """Support the existing agent_client without forcing one exact function name."""
     for name in (
         "call_agent",
         "invoke_agent",
@@ -129,7 +135,6 @@ def _call_agent(agent_name: str, question: str) -> Any:
     sig = inspect.signature(fn)
     names = list(sig.parameters.keys())
 
-    # Prefer keyword calls when the existing wrapper exposes descriptive parameter names.
     kwargs: Dict[str, Any] = {}
     for p in names:
         lp = p.lower()
@@ -141,11 +146,9 @@ def _call_agent(agent_name: str, question: str) -> Any:
     if len(kwargs) >= 2:
         return fn(**kwargs)
 
-    # Common positional pattern: (agent_name, question)
     if len(names) >= 2:
         return fn(agent_name, question)
 
-    # Some wrappers bind the agent internally and accept only a question.
     if len(names) == 1:
         return fn(question)
 
@@ -153,7 +156,6 @@ def _call_agent(agent_name: str, question: str) -> Any:
 
 
 def _normalize_agent_response(result: Any) -> Tuple[str, List[str]]:
-    """Return display text and optional tool names from common wrapper response shapes."""
     if result is None:
         return "No response returned by the agent.", []
 
@@ -168,13 +170,12 @@ def _normalize_agent_response(result: Any) -> Tuple[str, List[str]]:
             or result.get("message")
             or result.get("content")
         )
-        tools = result.get("tools") or result.get("tool_names") or []
+        tools = result.get("tools") or result.get("tool_names") or result.get("tools_used") or []
         if isinstance(tools, str):
             tools = [tools]
         if text is not None:
             return str(text), list(tools)
 
-    # Last-resort readable representation.
     return str(result), []
 
 
@@ -192,10 +193,6 @@ def _find_chart_renderer() -> Optional[Callable[..., Any]]:
 
 
 def _render_optional_chart(expert_name: str, question: str) -> None:
-    """
-    Preserve the existing chart module where possible.
-    If chart_queries.py does not expose a generic renderer, the normal chat still works.
-    """
     renderer = _find_chart_renderer()
     if renderer is None:
         return
@@ -224,13 +221,11 @@ def _render_optional_chart(expert_name: str, question: str) -> None:
         if chart is None:
             return
 
-        # Support either a renderer that draws itself or one that returns a chart.
         if hasattr(chart, "to_dict") or chart.__class__.__module__.startswith("altair"):
-            st.altair_chart(chart, width="stretch")
+            st.altair_chart(chart)
         elif hasattr(chart, "figure"):
             st.pyplot(chart.figure)
     except Exception:
-        # Charting is supplemental. Do not fail the core conversation.
         return
 
 
@@ -254,7 +249,6 @@ def _reset_conversation() -> None:
 
 
 def _on_expert_change() -> None:
-    # New domain = new focused conversation.
     _reset_conversation()
 
 
@@ -277,9 +271,9 @@ def _render_expert_selector() -> str:
     with col2:
         st.write("")
         st.write("")
-        if st.button("Start over", width="stretch"):
+        if st.button("Start over"):
             _reset_conversation()
-            st.rerun()
+            _safe_rerun()
 
     cfg = EXPERTS[expert]
     st.markdown(f"**{cfg['description']}**")
@@ -295,13 +289,6 @@ def _render_expert_selector() -> str:
 
 
 def _render_suggestions(expert_name: str) -> None:
-    """
-    Suggestions are visible only before the first submitted question.
-
-    Clicking a suggestion selects it.
-    Clicking Ask submits it.
-    Only after submission do all suggestions disappear.
-    """
     if st.session_state.conversation_started:
         return
 
@@ -313,14 +300,13 @@ def _render_suggestions(expert_name: str) -> None:
 
     for idx, suggestion in enumerate(suggestions):
         is_selected = st.session_state.selected_suggestion == suggestion
-        label = f"{'✓ ' if is_selected else ''}{suggestion}"
+        label = f"{'> ' if is_selected else ''}{suggestion}"
         if st.button(
             label,
             key=f"suggestion_{expert_name}_{idx}",
-            width="stretch",
         ):
             st.session_state.selected_suggestion = suggestion
-            st.rerun()
+            _safe_rerun()
 
     if st.session_state.selected_suggestion:
         st.text_area(
@@ -333,24 +319,26 @@ def _render_suggestions(expert_name: str) -> None:
         ask_col, clear_col = st.columns([1, 1])
 
         with ask_col:
-            if st.button("Ask", type="primary", width="stretch"):
+            if st.button("Ask"):
                 question = st.session_state.selected_suggestion
                 st.session_state.conversation_started = True
                 st.session_state.selected_suggestion = None
                 st.session_state.pending_question = question
-                st.rerun()
+                _safe_rerun()
 
         with clear_col:
-            if st.button("Choose another", width="stretch"):
+            if st.button("Choose another"):
                 st.session_state.selected_suggestion = None
-                st.rerun()
+                _safe_rerun()
 
 
 def _render_message_history() -> None:
     for msg in st.session_state.messages:
         role = msg.get("role", "assistant")
-        with st.chat_message(role):
-            st.markdown(msg.get("content", ""))
+        if role == "user":
+            st.markdown(f"**You:** {msg.get('content', '')}")
+        else:
+            st.markdown(f"**Expert:** {msg.get('content', '')}")
             tools = msg.get("tools") or []
             if tools:
                 st.caption("Tools: " + ", ".join(tools))
@@ -364,26 +352,24 @@ def _process_question(expert_name: str, question: str) -> None:
     st.session_state.conversation_started = True
     st.session_state.messages.append({"role": "user", "content": question})
 
-    with st.chat_message("user"):
-        st.markdown(question)
+    st.markdown(f"**You:** {question}")
 
-    with st.chat_message("assistant"):
-        _render_optional_chart(expert_name, question)
+    _render_optional_chart(expert_name, question)
 
-        with st.spinner(f"Consulting the {expert_name}..."):
-            try:
-                raw = _call_agent(EXPERTS[expert_name]["agent"], question)
-                answer, tools = _normalize_agent_response(raw)
-            except Exception as exc:
-                answer = (
-                    "I couldn't complete the agent request. "
-                    f"Details: {exc}"
-                )
-                tools = []
+    with st.spinner(f"Consulting the {expert_name}..."):
+        try:
+            raw = _call_agent(EXPERTS[expert_name]["agent"], question)
+            answer, tools = _normalize_agent_response(raw)
+        except Exception as exc:
+            answer = (
+                "I couldn't complete the agent request. "
+                f"Details: {exc}"
+            )
+            tools = []
 
-        st.markdown(answer)
-        if tools:
-            st.caption("Tools: " + ", ".join(tools))
+    st.markdown(f"**Expert:** {answer}")
+    if tools:
+        st.caption("Tools: " + ", ".join(tools))
 
     st.session_state.messages.append(
         {
@@ -395,10 +381,21 @@ def _process_question(expert_name: str, question: str) -> None:
 
 
 def _render_chat_input(expert_name: str) -> None:
-    question = st.chat_input(f"Ask the {expert_name}...")
+    st.markdown("---")
+    input_col, btn_col = st.columns([5, 1])
 
-    if question:
-        # Free-form submission starts the conversation immediately and hides suggestions.
+    with input_col:
+        question = st.text_input(
+            f"Ask the {expert_name}",
+            key="user_question_input",
+            label_visibility="collapsed",
+            placeholder=f"Ask the {expert_name}...",
+        )
+
+    with btn_col:
+        submitted = st.button("Send")
+
+    if submitted and question:
         st.session_state.conversation_started = True
         _process_question(expert_name, question)
 
@@ -421,16 +418,12 @@ def main() -> None:
 
     expert_name = _render_expert_selector()
 
-    # Risk-case visibility is available throughout the app, but actions stay agent-governed.
     _render_risk_case_panel()
 
-    # Suggestions exist only before first submission.
     _render_suggestions(expert_name)
 
-    # Existing conversation.
     _render_message_history()
 
-    # Handle a suggestion that was explicitly confirmed with Ask.
     pending = st.session_state.pop("pending_question", None)
     if pending:
         _process_question(expert_name, pending)
