@@ -5,10 +5,10 @@
 
 -- ===== STRUCTURAL CHECKS =====
 
--- 1. Column count = 24
-SELECT 'Column count = 24' AS check_name,
+-- 1. Column count = 27 (24 original + 3 demand coverage from V3.7.0)
+SELECT 'Column count = 27' AS check_name,
        COUNT(*) AS val,
-       CASE WHEN COUNT(*) = 24 THEN 'PASS' ELSE 'FAIL' END AS result
+       CASE WHEN COUNT(*) = 27 THEN 'PASS' ELSE 'FAIL' END AS result
 FROM SUPPLY_CHAIN_DW.INFORMATION_SCHEMA.COLUMNS
 WHERE TABLE_SCHEMA = 'GOLD' AND TABLE_NAME = 'MART_INVENTORY_RISK'
   AND TABLE_CATALOG = 'SUPPLY_CHAIN_DW';
@@ -28,6 +28,87 @@ SELECT 'Grain uniqueness (PLANT_ID+PART_ID)' AS check_name,
        CASE WHEN COUNT(*) = COUNT(DISTINCT PLANT_ID || '|' || PART_ID)
             THEN 'PASS' ELSE 'FAIL' END AS result
 FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK;
+
+-- =============================================================================
+-- DAYS OF DEMAND COVERAGE (90D) CHECKS — V3.7.0
+-- =============================================================================
+
+-- 19. Column count updated to 27 (24 original + 3 demand coverage)
+SELECT 'Column count = 27' AS check_name,
+       (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = 'GOLD' AND TABLE_NAME = 'MART_INVENTORY_RISK') AS actual,
+       27 AS expected,
+       CASE WHEN (SELECT COUNT(*) FROM SUPPLY_CHAIN_DW.INFORMATION_SCHEMA.COLUMNS
+                  WHERE TABLE_SCHEMA = 'GOLD' AND TABLE_NAME = 'MART_INVENTORY_RISK') = 27
+            THEN 'PASS' ELSE 'FAIL' END AS result;
+
+-- 20. 90-day demand window: ORDER_DEMAND_QTY_90D is populated or NULL (no negatives)
+SELECT 'Demand qty non-negative' AS check_name,
+       SUM(CASE WHEN ORDER_DEMAND_QTY_90D < 0 THEN 1 ELSE 0 END) AS violations,
+       CASE WHEN SUM(CASE WHEN ORDER_DEMAND_QTY_90D < 0 THEN 1 ELSE 0 END) = 0
+            THEN 'PASS' ELSE 'FAIL' END AS result
+FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK;
+
+-- 21. AVG_DAILY_ORDER_DEMAND_90D = ORDER_DEMAND_QTY_90D / 90 (within tolerance)
+SELECT 'Daily demand formula' AS check_name,
+       SUM(CASE WHEN ORDER_DEMAND_QTY_90D IS NOT NULL
+                 AND ABS(AVG_DAILY_ORDER_DEMAND_90D - ROUND(ORDER_DEMAND_QTY_90D / 90.0, 4)) > 0.01
+            THEN 1 ELSE 0 END) AS violations,
+       CASE WHEN SUM(CASE WHEN ORDER_DEMAND_QTY_90D IS NOT NULL
+                 AND ABS(AVG_DAILY_ORDER_DEMAND_90D - ROUND(ORDER_DEMAND_QTY_90D / 90.0, 4)) > 0.01
+            THEN 1 ELSE 0 END) = 0
+            THEN 'PASS' ELSE 'FAIL' END AS result
+FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK;
+
+-- 22. DAYS_OF_DEMAND_COVERAGE_90D = AVAILABLE_QTY / (ORDER_DEMAND_QTY_90D / 90)
+-- Uses raw demand_qty / 90 as denominator (matching the INSERT formula, not the rounded column)
+SELECT 'Coverage formula' AS check_name,
+       SUM(CASE WHEN ORDER_DEMAND_QTY_90D > 0
+                 AND ABS(DAYS_OF_DEMAND_COVERAGE_90D
+                       - ROUND(AVAILABLE_QTY / (ORDER_DEMAND_QTY_90D / 90.0), 4)) > 0.01
+            THEN 1 ELSE 0 END) AS violations,
+       CASE WHEN SUM(CASE WHEN ORDER_DEMAND_QTY_90D > 0
+                 AND ABS(DAYS_OF_DEMAND_COVERAGE_90D
+                       - ROUND(AVAILABLE_QTY / (ORDER_DEMAND_QTY_90D / 90.0), 4)) > 0.01
+            THEN 1 ELSE 0 END) = 0
+            THEN 'PASS' ELSE 'FAIL' END AS result
+FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK;
+
+-- 23. Zero-demand handling: NULL coverage when no demand
+SELECT 'Zero-demand = NULL coverage' AS check_name,
+       SUM(CASE WHEN (ORDER_DEMAND_QTY_90D IS NULL OR ORDER_DEMAND_QTY_90D = 0)
+                 AND DAYS_OF_DEMAND_COVERAGE_90D IS NOT NULL
+            THEN 1 ELSE 0 END) AS violations,
+       CASE WHEN SUM(CASE WHEN (ORDER_DEMAND_QTY_90D IS NULL OR ORDER_DEMAND_QTY_90D = 0)
+                 AND DAYS_OF_DEMAND_COVERAGE_90D IS NOT NULL
+            THEN 1 ELSE 0 END) = 0
+            THEN 'PASS' ELSE 'FAIL' END AS result
+FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK;
+
+-- 24. No negative coverage days
+SELECT 'No negative coverage' AS check_name,
+       SUM(CASE WHEN DAYS_OF_DEMAND_COVERAGE_90D < 0 THEN 1 ELSE 0 END) AS violations,
+       CASE WHEN SUM(CASE WHEN DAYS_OF_DEMAND_COVERAGE_90D < 0 THEN 1 ELSE 0 END) = 0
+            THEN 'PASS' ELSE 'FAIL' END AS result
+FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK;
+
+-- 25. Demand qty reconciles to Silver (within matched plant+part population)
+-- Note: Silver may have demand for plant+parts NOT in inventory mart; that's expected.
+SELECT 'Demand reconciles to Silver (matched positions)' AS check_name,
+       ABS(gold_total - silver_total) AS difference,
+       CASE WHEN ABS(gold_total - silver_total) < 1 THEN 'PASS' ELSE 'FAIL' END AS result
+FROM (
+    SELECT (SELECT SUM(ORDER_DEMAND_QTY_90D)
+            FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK) AS gold_total,
+           (SELECT SUM(fol.ORDERED_QTY)
+            FROM SUPPLY_CHAIN_DW.SILVER.FACT_ORDER_LINE fol
+            JOIN (SELECT MAX(ORDER_DATE_KEY) AS md FROM SUPPLY_CHAIN_DW.SILVER.FACT_ORDER_LINE) a
+              ON fol.ORDER_DATE_KEY >= DATEADD(DAY, -90, a.md)
+            WHERE fol.LINE_STATUS != 'CANCELLED'
+              AND EXISTS (SELECT 1 FROM SUPPLY_CHAIN_DW.GOLD.MART_INVENTORY_RISK inv
+                          WHERE inv.PLANT_ID = fol.PLANT_ID AND inv.PART_ID = fol.PART_ID)
+           ) AS silver_total
+);
 
 -- 4. No NULL composite key
 SELECT 'No NULL PLANT_ID or PART_ID' AS check_name,

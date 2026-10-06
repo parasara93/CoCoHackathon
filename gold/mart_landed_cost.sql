@@ -1,0 +1,10 @@
+-- =============================================================================
+-- MART_LANDED_COST — Derived Gold Mart (Legacy CTAS file)
+-- =============================================================================
+-- This file is superseded by the migration-convention split:
+--   DDL:       migrations/V3.6.0__create_mart_landed_cost.sql
+--   Populate:  gold/populate_mart_landed_cost.sql
+--   Validate:  validations/gold/mart_landed_cost_checks.sql
+--
+-- See populate_mart_landed_cost.sql for the governed quantity-weighted formula.
+-- =============================================================================
