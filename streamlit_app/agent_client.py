@@ -1,10 +1,12 @@
 """
-agent_client.py — Wrapper for calling Snowflake Cortex Agents via SP_INVOKE_AGENT.
+agent_client.py — Wrapper for calling Snowflake Cortex Agents via DATA_AGENT_RUN.
+
+All agents are invoked directly. The Overall Resilience Expert maps to
+RESILIENCE_INSIGHTS_AGENT (read-only, no MCP/action tools) which works
+from warehouse-runtime Streamlit sessions without the SP bridge.
 """
 import json
 from decimal import Decimal
-
-import streamlit as st
 
 
 AGENT_MAP = {
@@ -13,7 +15,7 @@ AGENT_MAP = {
     "Inventory & Plant Expert": "SUPPLY_CHAIN_DW.GOLD.INVENTORY_RISK_AGENT",
     "Plant Fulfillment Expert": "SUPPLY_CHAIN_DW.GOLD.PLANT_FULFILLMENT_AGENT",
     "Customer Impact Expert": "SUPPLY_CHAIN_DW.GOLD.CUSTOMER_IMPACT_AGENT",
-    "Overall Resilience Expert": "SUPPLY_CHAIN_DW.GOLD.RESILIENCE_ORCHESTRATOR",
+    "Overall Resilience Expert": "SUPPLY_CHAIN_DW.GOLD.RESILIENCE_INSIGHTS_AGENT",
 }
 
 
@@ -22,68 +24,20 @@ def _get_session():
     return get_active_session()
 
 
-def call_agent(expert: str, question: str) -> dict:
-    """Call the specialist agent mapped to `expert` with `question`.
-
-    Uses SP_INVOKE_AGENT stored procedure to ensure DATA_AGENT_RUN
-    executes in a proper SQL context (EXECUTE AS OWNER), which avoids
-    the 399525 internal error seen in warehouse-runtime Streamlit sessions.
-
-    Returns dict with keys: text, tools_used, raw.
-    """
-    agent_fqn = AGENT_MAP.get(expert)
-    if agent_fqn is None:
-        if expert in AGENT_MAP.values():
-            agent_fqn = expert
-        else:
-            raise KeyError(f"Unknown expert: {expert}")
-
-    # Escape single quotes in the question for safe SQL embedding.
-    safe_question = question.replace("'", "''")
-
-    sql = (
-        f"CALL SUPPLY_CHAIN_DW.GOLD.SP_INVOKE_AGENT("
-        f"'{agent_fqn}',"
-        f"'{safe_question}'"
-        f")"
-    )
-
-    session = _get_session()
-
-    try:
-        session.sql("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 300").collect()
-    except Exception:
-        pass
-
-    rows = session.sql(sql).collect()
-    raw_val = rows[0][0]
-
-    # Parse the JSON response string.
+def _parse_response(raw_val) -> dict:
+    """Parse DATA_AGENT_RUN response into {text, tools_used, raw}."""
     if isinstance(raw_val, str):
         try:
             resp = json.loads(raw_val)
         except (json.JSONDecodeError, TypeError):
-            return {
-                "text": raw_val,
-                "tools_used": [],
-                "raw": raw_val,
-            }
+            return {"text": raw_val, "tools_used": [], "raw": raw_val}
     elif isinstance(raw_val, dict):
         resp = raw_val
     elif raw_val is None:
-        return {
-            "text": "Agent returned no response.",
-            "tools_used": [],
-            "raw": None,
-        }
+        return {"text": "Agent returned no response.", "tools_used": [], "raw": None}
     else:
-        return {
-            "text": str(raw_val),
-            "tools_used": [],
-            "raw": str(raw_val),
-        }
+        return {"text": str(raw_val), "tools_used": [], "raw": str(raw_val)}
 
-    # Check for error response — show full detail.
     if isinstance(resp, dict) and "code" in resp and "content" not in resp:
         code = resp.get("code", "unknown")
         message = resp.get("message", "Unknown error")
@@ -91,13 +45,8 @@ def call_agent(expert: str, question: str) -> dict:
         error_detail = f"Agent error [{code}]: {message}"
         if request_id:
             error_detail += f" (request_id: {request_id})"
-        return {
-            "text": error_detail,
-            "tools_used": [],
-            "raw": resp,
-        }
+        return {"text": error_detail, "tools_used": [], "raw": resp}
 
-    # Extract text and tool names from successful response.
     text_parts = []
     tools_used = []
     for item in resp.get("content", []):
@@ -119,6 +68,41 @@ def call_agent(expert: str, question: str) -> dict:
         "tools_used": list(dict.fromkeys(tools_used)),
         "raw": resp,
     }
+
+
+def call_agent(expert: str, question: str) -> dict:
+    """Call the agent mapped to `expert` with `question`."""
+    agent_fqn = AGENT_MAP.get(expert)
+    if agent_fqn is None:
+        if expert in AGENT_MAP.values():
+            agent_fqn = expert
+        else:
+            raise KeyError(f"Unknown expert: {expert}")
+
+    payload = json.dumps({
+        "messages": [
+            {"role": "user", "content": [{"type": "text", "text": question}]}
+        ]
+    })
+    safe_payload = payload.replace("'", "''")
+
+    sql = (
+        f"SELECT SNOWFLAKE.CORTEX.DATA_AGENT_RUN("
+        f"'{agent_fqn}',"
+        f"'{safe_payload}',"
+        f"TRUE"
+        f") AS response"
+    )
+
+    session = _get_session()
+
+    try:
+        session.sql("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 300").collect()
+    except Exception:
+        pass
+
+    rows = session.sql(sql).collect()
+    return _parse_response(rows[0][0])
 
 
 def run_sql(sql: str) -> list[dict]:
